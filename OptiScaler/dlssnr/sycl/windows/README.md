@@ -54,6 +54,19 @@ Send back the full console output, the SHA-256 printed for the DLL and
 weight files unless you intend to share the extracted model. The two
 `smoke-*.rgba16f` files are safe test images and useful for visual comparison.
 
+For a Black Myth: Wukong installation made by DLSS5 Swapper, collect the
+actual installed filenames and hashes before replacing anything:
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\src\OptiScaler-SYCL\OptiScaler\dlssnr\sycl\windows\collect_wukong_preflight.ps1 -GameRoot "C:\path\to\BlackMythWukong" -OutputJson "C:\arc-nr-private-test\wukong-preflight.json"
+```
+
+The game root may also be its `b1\Binaries\Win64` directory. Review the JSON
+before sharing it: it includes local file paths, filenames, sizes and hashes,
+but no model binaries or weight bytes. Do not overwrite the Swapper-installed
+OptiScaler files with this branch yet; the native D3D12 SYCL dispatch is not
+wired and the two package layouts may differ.
+
 ## Native D3D12 in-game gate
 
 The provider test above establishes only that the model DLL and weights run
