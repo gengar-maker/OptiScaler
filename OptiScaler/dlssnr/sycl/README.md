@@ -30,21 +30,24 @@ On Windows, pass the Intel oneAPI compiler and oneDNN include/library paths
 to CMake, then place `arc_nr_sycl.dll` and its runtime dependencies beside
 OptiScaler. The Windows build and in-game invocation have not been tested.
 
-The provider and loader are not yet a working in-game backend. In the current D3D12 path the
-upscaler, NR colour encoding, NR evaluation and output resolve are recorded
-into one game-owned open command list. The SYCL API must **not** be called
-there: the colour encode has not executed. OptiScaler must first install one
-of these explicit scheduling routes:
+The chosen scheduling contract is **same-frame**. The D3D11→D3D12 and
+Vulkan→D3D12 bridges own their command allocators, lists and queue. The new
+`ArcNrSyclOwnedListBridge` is a correctness-first primitive for those paths:
+submit the encoded input, fence it, read back RGBA16F, evaluate SYCL, upload
+RGBA16F, fence again, then reset the owned list so the caller can record the
+resolve and copy-back. It rejects non-RGBA16F surfaces. This is intentionally
+slow; it is a staging contract to validate before shared-memory optimization.
 
-1. Same-frame: acquire a host-controlled boundary that can submit the colour
-   producer, wait for it, run SYCL, and submit the output consumer before UI.
-   This requires changing command-list recording/ownership; the existing
-   `ExecuteCommandLists` hook alone runs too late to split the list.
-2. Delayed: record and fence an input readback in frame N, execute SYCL after
-   submission, then consume the ready output in a later frame. This can use
-   the existing submission hook, but changes temporal behavior and must be an
-   explicit user choice.
+The primitive is included in the Visual Studio project but **not yet called
+or Windows-build-tested**. `DlssNr_Dx12::Dispatch`
+still combines NVIDIA-only initialization, encode, evaluation and resolve in
+one function. It must be split so the owned-list bridge can replace only the
+evaluation stage, with no NVIDIA forwarder or feature creation. The provider
+also needs the game-resource/temporal inputs aligned with the exported model
+before claiming equivalent NR output. Thus the DLLs are not a working in-game
+SYCL option yet. Do not silently fall back to NVIDIA on a SYCL failure.
 
-Until a route is implemented and tested on a Windows Intel GPU, do not expose
-this as a working menu option or silently fall back to NVIDIA's model. The
-Windows loader exists but is not called by the NR dispatch path yet.
+Native D3D12 games supply a game-owned open list. OptiScaler cannot close or
+reset that list; an `ExecuteCommandLists` hook is too late to interleave the
+SYCL call inside it. Same-frame native D3D12 support needs an explicit
+host-controlled split point. Do not invoke the owned-list bridge on that path.
