@@ -29,6 +29,9 @@ build-sycl/arc_nr_sycl_provider_smoke LOGICAL_DIR DERIVED_DIR \
 On Windows, pass the Intel oneAPI compiler and oneDNN include/library paths
 to CMake, then place `arc_nr_sycl.dll` and its runtime dependencies beside
 OptiScaler. The Windows build and in-game invocation have not been tested.
+For a reproducible Windows provider build and non-black frame test, follow
+[windows/README.md](windows/README.md). That test does not enable native
+D3D12 in-game SYCL scheduling.
 
 The chosen scheduling contract is **same-frame**. The D3D11→D3D12 and
 Vulkan→D3D12 bridges own their command allocators, lists and queue. The new
