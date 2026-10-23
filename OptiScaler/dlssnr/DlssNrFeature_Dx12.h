@@ -16,13 +16,28 @@
 // vectors, so anything guessing from the parameter block alone attaches to both and runs the model twice
 // per rendered frame. Here it is a lookup on the feature handle.
 class Config;
+class ArcNrSyclLoader;
+class ArcNrSyclOwnedListBridge;
 
 namespace DlssNr
 {
+struct SyclDispatchContext
+{
+    ArcNrSyclLoader* provider = nullptr;
+    ArcNrSyclOwnedListBridge* bridge = nullptr;
+    ID3D12CommandAllocator* allocator = nullptr;
+    // Set false if the bridge leaves the owned command list closed after a failure.
+    bool* listRecording = nullptr;
+    bool hasOutputArrival = false;
+    D3D12_RESOURCE_STATES outputArrival = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    bool freshOwnedList = false;
+    bool* passCompleted = nullptr;
+};
 // The model runs immediately after the game's upscaler, before the interface is drawn. It is shown a
 // display-referred proxy of that frame -- the sort of picture it was trained on -- and its answer is
 // composed back over the untouched original.
-// Runs the model over Output on the same command list, immediately after the upscaler has written it.
+// Runs over Output immediately after the upscaler when the caller owns its list.
+// Native D3D12 SYCL records a pending pass and executes on an owned list at queue submission.
 // Called only for upscaler evaluates -- never for frame generation, which is the whole point.
 //
 // Safe to call every frame; it builds what it needs on first use and disables itself for the session if
@@ -31,7 +46,10 @@ namespace DlssNr
 // State::currentCommandQueue only exists once a D3D12 swapchain has been created, which a Vulkan
 // game never does -- so without this the pass runs and never reports what it cost.
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
-                          ID3D12CommandQueue* timingQueue = nullptr);
+                          ID3D12CommandQueue* timingQueue = nullptr,
+                          SyclDispatchContext* sycl = nullptr);
+bool HasNativePending(ID3D12CommandList* list);
+void ProcessNativeSubmission(ID3D12CommandQueue* queue, ID3D12CommandList* list);
 
 
 

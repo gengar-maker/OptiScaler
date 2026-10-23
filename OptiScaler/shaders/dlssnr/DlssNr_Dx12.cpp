@@ -8,6 +8,8 @@
 #include <dlssnr/DlssNr_Capture.h>
 #include <dlssnr/DlssNr_Proxy.h>
 #include <dlssnr/DlssNr_ExposureScan.h>
+#include <dlssnr/sycl/ArcNrSyclLoader.h>
+#include <dlssnr/sycl/ArcNrSyclOwnedListBridge.h>
 
 #include "DlssNr_Dx12.h"
 
@@ -22,6 +24,7 @@
 #include <mutex>
 #include <algorithm>
 #include <cstring>
+#include <unordered_map>
 #include "precompile/DlssNr_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
 
@@ -343,11 +346,31 @@ struct NrState
     // Once something fails there is no recovering it mid-session, and retrying every frame turns a
     // failure into a crash. It stays off and says why.
     bool failed = false;
+    bool syclRunning = false;
     const char* reason = "";
 };
 
 NrState g_nr;
 std::unique_ptr<DlssNr_Dx12> g_compose;
+
+struct NativePending
+{
+    Microsoft::WRL::ComPtr<ID3D12Resource> output;
+    Microsoft::WRL::ComPtr<ID3D12Resource> depth;
+    Microsoft::WRL::ComPtr<ID3D12Resource> motion;
+    DlssNrFrameInfo frame {};
+};
+
+std::mutex g_nativePendingMutex;
+std::mutex g_nativeRunMutex;
+std::unordered_map<ID3D12CommandList*, NativePending> g_nativePending;
+ArcNrSyclLoader g_nativeProvider;
+ArcNrSyclOwnedListBridge g_nativeBridge;
+unsigned int g_nativeProviderWidth = 0;
+unsigned int g_nativeProviderHeight = 0;
+std::vector<Microsoft::WRL::ComPtr<ID3D12CommandAllocator>> g_nativeTimedOutAllocators;
+std::vector<Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList>> g_nativeTimedOutLists;
+std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> g_nativeTimedOutOutputs;
 
 // What the pass costs on the GPU, for the breakdown in the overlay.
 std::unique_ptr<GpuTime_Dx12> g_gpuTime;
@@ -726,7 +749,7 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed)
         ParkNrFeature(f);
 
     for (ID3D12Resource** r :
-         { &g_nr.output, &g_nr.colorCopy, &g_nr.hdrCopy, &g_nr.colorSmall })
+         { &g_nr.output, &g_nr.colorCopy, &g_nr.hdrCopy, &g_nr.colorSmall, &g_nr.outputNative })
         ParkNrResource(*r);
 
     g_nr.reset = true;
@@ -1329,6 +1352,7 @@ std::mutex g_nrMutex;
 struct ScopedNrStateEnvelope
 {
     ID3D12GraphicsCommandList* cmd;
+    bool recording = true;
     ScopedSkipHeapCapture skipHeap;
 
     explicit ScopedNrStateEnvelope(ID3D12GraphicsCommandList* c) : cmd(c)
@@ -1338,7 +1362,8 @@ struct ScopedNrStateEnvelope
 
     ~ScopedNrStateEnvelope()
     {
-        D3D12Hooks::RestoreRoot(cmd);
+        if (recording)
+            D3D12Hooks::RestoreRoot(cmd);
         D3D12Hooks::SetRootSignatureTracking(true);
     }
 };
@@ -1491,10 +1516,21 @@ DlssNr_Dx12::~DlssNr_Dx12()
 
 void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour,
                            ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* output,
-                           const DlssNrFrameInfo& frame, ID3D12CommandQueue* timingQueue)
+                           const DlssNrFrameInfo& frame, ID3D12CommandQueue* timingQueue,
+                           DlssNr::SyclDispatchContext* sycl)
 {
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
     const Config& cfg = *Config::Instance();
+    const bool useSycl = cfg.DlssNrBackend.value_or_default() == 1;
+    if (sycl != nullptr && sycl->passCompleted != nullptr)
+        *sycl->passCompleted = false;
+
+    if (useSycl && (sycl == nullptr || sycl->provider == nullptr || sycl->bridge == nullptr ||
+                    sycl->allocator == nullptr || sycl->listRecording == nullptr || timingQueue == nullptr))
+    {
+        ReportSkipOnce("SYCL requires an OptiScaler-owned command list and queue (D3D11 bridge)");
+        return;
+    }
 
     if (g_nr.failed || cmdList == nullptr || colour == nullptr || depth == nullptr ||
         motion == nullptr || output == nullptr)
@@ -1512,6 +1548,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // restores the arrival state before every exit. When the config is unset the two states are equal
     // and Barrier() skips the no-op, so the default path is byte-identical.
     const D3D12_RESOURCE_STATES outputArrival =
+        sycl != nullptr && sycl->hasOutputArrival ? sycl->outputArrival :
         Config::Instance()->OutputResourceBarrier.has_value()
             ? (D3D12_RESOURCE_STATES) Config::Instance()->OutputResourceBarrier.value()
             : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
@@ -1637,10 +1674,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                  g_nr.guideMvScaleY, guideWidth, guideHeight, width, height);
     }
 
-    if (cfg.DlssNrProxyProbe.value_or_default())
+    if (!useSycl && cfg.DlssNrProxyProbe.value_or_default())
         ProbeProxyDispatch(cmdList);
 
-    if (!EnsureForwarder() || !EnsureCapabilityParams(device))
+    if (!useSycl && (!EnsureForwarder() || !EnsureCapabilityParams(device)))
     {
         g_nr.failed = true;
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
@@ -1659,7 +1696,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const auto workHeight = (unsigned int) (height * workScale + 0.5f);
     const bool reduced = workWidth != width || workHeight != height;
 
-    ReleaseSurfacesIfFormatChanged(desc.Format);
+    // The SYCL ABI shares RGBA16F through GPU heaps. The encode and resolve shaders can read and
+    // write different typed textures, so convert in scratch without requiring
+    // the game's upscaler output to be RGBA16F.
+    const DXGI_FORMAT scratchFormat = useSycl ? DXGI_FORMAT_R16G16B16A16_FLOAT : desc.Format;
+    ReleaseSurfacesIfFormatChanged(scratchFormat);
 
     const bool resolutionChanged = g_nr.width != width || g_nr.height != height ||
                                    g_nr.workWidth != workWidth || g_nr.workHeight != workHeight;
@@ -1670,7 +1711,16 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // else -- a resolution change -- happened to force a rebuild by accident.
     const bool tuningChanged = !TuningMatchesFeature(cfg);
 
-    if (g_nr.feature != nullptr && (resolutionChanged || tuningChanged))
+    if (useSycl && resolutionChanged)
+    {
+        ParkNrResource(g_nr.output);
+        ParkNrResource(g_nr.colorCopy);
+        ParkNrResource(g_nr.hdrCopy);
+        ParkNrResource(g_nr.colorSmall);
+        ParkNrResource(g_nr.outputNative);
+    }
+
+    if (!useSycl && g_nr.feature != nullptr && (resolutionChanged || tuningChanged))
     {
         // Parked rather than released: with frame generation the GPU can still be several frames
         // deep in work that references all of it.
@@ -1693,19 +1743,35 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (g_nr.output == nullptr)
     {
-        g_nr.output = CreateScratch(device, desc.Format, workWidth, workHeight);
-        g_nr.colorCopy = CreateScratch(device, desc.Format, width, height);
-        g_nr.hdrCopy = CreateScratch(device, desc.Format, width, height);
+        g_nr.output = CreateScratch(device, scratchFormat, workWidth, workHeight);
+        g_nr.colorCopy = CreateScratch(device, scratchFormat, width, height);
+        g_nr.hdrCopy = CreateScratch(device, scratchFormat, width, height);
         g_nr.workWidth = workWidth;
         g_nr.workHeight = workHeight;
     }
 
+    if (useSycl)
+    {
+        if (g_nr.output == nullptr || g_nr.colorCopy == nullptr || g_nr.hdrCopy == nullptr)
+        {
+            g_nr.failed = true;
+            g_nr.reason = "SYCL colour GPU resources could not be allocated";
+            LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+            device->Release();
+            return;
+        }
+        g_nr.width = width;
+        g_nr.height = height;
+        if (resolutionChanged)
+            g_nr.reset = true;
+    }
+
     if (reduced && g_nr.colorSmall == nullptr)
-        g_nr.colorSmall = CreateScratch(device, desc.Format, workWidth, workHeight);
+        g_nr.colorSmall = CreateScratch(device, scratchFormat, workWidth, workHeight);
 
     // The down-leg target is native (the answer is brought back to frame size before the resolve).
     if (workScale > 1.0f && g_nr.outputNative == nullptr)
-        g_nr.outputNative = CreateScratch(device, desc.Format, width, height);
+        g_nr.outputNative = CreateScratch(device, scratchFormat, width, height);
 
     if (g_nr.meter == nullptr)
     {
@@ -1740,7 +1806,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             LOG_INFO("DLSS-NR: white point meter up, {}x{} tiles", kDlssNrMeterGrid, kDlssNrMeterGrid);
     }
 
-    if (g_nr.feature == nullptr && g_nr.output != nullptr && g_nr.colorCopy != nullptr &&
+    if (!useSycl && g_nr.feature == nullptr && g_nr.output != nullptr && g_nr.colorCopy != nullptr &&
         g_nr.hdrCopy != nullptr)
     {
         auto snippet = Util::FindFilePath(g_dllDir, "nvngx_dlssnr.dll");
@@ -1799,7 +1865,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return;
     }
 
-    if (g_nr.feature == nullptr)
+    if (!useSycl && g_nr.feature == nullptr)
     {
         device->Release();
         return;
@@ -1871,8 +1937,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // touching state was unsafe this frame, and binding the pass now would leave state the envelope
     // cannot clean up. So on those games, skip the frame rather than corrupt it. Ordinary games do
     // not require restore, so they are unaffected and the pass runs as before.
-    const bool restoreRequired = cfg.RestoreComputeSignature.value_or_default() ||
-                                 cfg.RestoreGraphicSignature.value_or_default();
+    const bool restoreRequired = !(sycl != nullptr && sycl->freshOwnedList) &&
+                                 (cfg.RestoreComputeSignature.value_or_default() ||
+                                  cfg.RestoreGraphicSignature.value_or_default());
 
     if (restoreRequired && !D3D12Hooks::CanRestoreRootSignature(cmdList))
     {
@@ -1888,14 +1955,18 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // From here on the pass binds its own root signature, heaps and pipeline. Everything below runs
     // inside the envelope so the game's compute state is restored no matter which way this returns.
     ScopedNrStateEnvelope stateEnvelope(cmdList);
+    if (sycl != nullptr && sycl->freshOwnedList)
+        stateEnvelope.recording = false;
 
-    if (g_gpuTime == nullptr)
+    // The owned-list bridge closes and resets the list between encode and resolve.
+    // A D3D12 timestamp pair cannot span that split.
+    if (!useSycl && g_gpuTime == nullptr)
         g_gpuTime = std::make_unique<GpuTime_Dx12>(device);
 
-    if (g_ngxTime == nullptr)
+    if (!useSycl && g_ngxTime == nullptr)
         g_ngxTime = std::make_unique<GpuTime_Dx12>(device);
 
-    if (g_gpuTime != nullptr)
+    if (!useSycl && g_gpuTime != nullptr)
         g_gpuTime->Start(cmdList);
 
     // Fetch the game's exposure, where the game supplies one and the user asked for it.
@@ -2133,10 +2204,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Read the exposure scan's candidates on the pass's own command list, once a frame.
     DlssNr::ExposureScan::Tick(device, cmdList);
 
-    ID3D12Resource* depthIn = ReadableGuide(device, cmdList, depth, &g_nr.depthClone);
-    ID3D12Resource* motionIn = ReadableGuide(device, cmdList, motion, &g_nr.motionClone);
+    ID3D12Resource* depthIn = useSycl ? nullptr : ReadableGuide(device, cmdList, depth, &g_nr.depthClone);
+    ID3D12Resource* motionIn = useSycl ? nullptr : ReadableGuide(device, cmdList, motion, &g_nr.motionClone);
 
-    if (depthIn == nullptr || motionIn == nullptr)
+    if (!useSycl && (depthIn == nullptr || motionIn == nullptr))
     {
         g_nr.failed = true;
         g_nr.reason = "the game's depth or motion vectors could not be made readable";
@@ -2158,7 +2229,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Nothing falls back automatically. A silent fallback would mean never finding out the proxy
     // path was broken: the picture would look right either way, because the forwarder would be
     // quietly doing the work.
-    if (cfg.DlssNrUseProxy.value_or_default())
+    if (!useSycl && cfg.DlssNrUseProxy.value_or_default())
     {
         const unsigned int proxyResult = DlssNr::Proxy::Run(
             cmdList, device, modelInput, depthIn, motionIn, g_nr.output, workWidth, workHeight,
@@ -2180,21 +2251,62 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return;
     }
 
-    if (g_ngxTime != nullptr)
+    if (!useSycl && g_ngxTime != nullptr)
         g_ngxTime->Start(cmdList);
 
     // Multi-pass was removed: re-feeding the model its own output re-opened the same-command-list
     // feature-creation hang, and the colour core is not settled enough to build on. One evaluate.
-    const int result = g_nr.evaluate(
-        cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn, g_nr.output,
-        workWidth, workHeight, guideWidth, guideHeight, g_nr.guideDepthInverted ? 1 : 0,
-        g_nr.reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
-        (int) cfg.DlssNrStyle.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
-        cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
-        cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, g_nr.guideMvScaleX * mvToWork,
-        g_nr.guideMvScaleY * mvToWork);
+    int result = 0;
+    if (useSycl)
+    {
+        ArcNrSyclFrame syclFrame {};
+        syclFrame.struct_size = sizeof(syclFrame);
+        syclFrame.frame_index = static_cast<uint32_t>(g_frames);
+        // The current provider accepts history and motion together. This bridge has no
+        // normalized motion texture yet, so each frame is an independent inference.
+        syclFrame.reset_history = 1;
+        syclFrame.normalized_style = std::min(1.0f, cfg.DlssNrStyle.value_or_default() / 2.0f);
+        syclFrame.local_tone = cfg.DlssNrLocalTone.value_or_default();
+        syclFrame.local_structure = cfg.DlssNrLocalStructure.value_or_default();
+        syclFrame.skin_structure = cfg.DlssNrSkinStructure.value_or_default();
+        syclFrame.automatic_structure = cfg.DlssNrAutoMask.value_or_default() ? 1.0f : 0.0f;
+        syclFrame.intensity = cfg.DlssNrIntensity.value_or_default();
+        std::string syclError;
+        if (sycl->bridge->Run(device, timingQueue, cmdList, sycl->allocator, modelInput,
+                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, g_nr.output,
+                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS, *sycl->provider,
+                              syclFrame, *sycl->listRecording, syclError))
+        {
+            result = NVSDK_NGX_Result_Success;
+            g_nr.syclRunning = true;
+        }
+        else
+        {
+            g_nr.syclRunning = false;
+            g_nr.failed = true;
+            g_nr.reason = "the SYCL provider or D3D12 shared GPU bridge failed";
+            LOG_ERROR("DLSS-NR SYCL: {}", syclError);
+            if (!*sycl->listRecording)
+            {
+                stateEnvelope.recording = false;
+                device->Release();
+                return;
+            }
+        }
+    }
+    else
+    {
+        result = g_nr.evaluate(
+            cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn, g_nr.output,
+            workWidth, workHeight, guideWidth, guideHeight, g_nr.guideDepthInverted ? 1 : 0,
+            g_nr.reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
+            (int) cfg.DlssNrStyle.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
+            cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
+            cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, g_nr.guideMvScaleX * mvToWork,
+            g_nr.guideMvScaleY * mvToWork);
+    }
 
-    if (g_ngxTime != nullptr)
+    if (!useSycl && g_ngxTime != nullptr)
         g_ngxTime->End(cmdList);
 
     g_nr.reset = false;
@@ -2216,7 +2328,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Once, a few seconds in, so it lands after the values have been written at least once.
     static bool tuningReported = false;
 
-    if (!tuningReported && g_frames > 240)
+    if (!useSycl && !tuningReported && g_frames > 240)
     {
         tuningReported = true;
 
@@ -2393,7 +2505,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    if (g_gpuTime != nullptr)
+    if (!useSycl && g_gpuTime != nullptr)
     {
         g_gpuTime->End(cmdList);
 
@@ -2436,11 +2548,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // COPY_DEST, because a frozen frame does not copy. Putting it back unconditionally would be a
     // barrier from a state it is not in, so the frozen case is skipped here and picked up by the
     // first live frame after the toggle goes off -- which is a copy, and copies transition it.
-    if (g_nr.depthClone != nullptr)
+    if (!useSycl && g_nr.depthClone != nullptr)
         Barrier(cmdList, g_nr.depthClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_COPY_DEST);
 
-    if (g_nr.motionClone != nullptr)
+    if (!useSycl && g_nr.motionClone != nullptr)
         Barrier(cmdList, g_nr.motionClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_COPY_DEST);
 
@@ -2455,6 +2567,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Hand the output back in the state the upscaler and the game expect.
     Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
 
+    if (sycl != nullptr && sycl->passCompleted != nullptr)
+        *sycl->passCompleted = true;
     device->Release();
 }
 
@@ -2474,7 +2588,7 @@ void RetryAfterFailure()
 // reprojection stage, a frame generation path, anything that is not the upscaler seam -- calls
 // RunPass directly and never touches an NGX parameter block.
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
-                          ID3D12CommandQueue* timingQueue)
+                          ID3D12CommandQueue* timingQueue, SyclDispatchContext* sycl)
 {
     if (!Config::Instance()->DlssNrEnabled.value_or_default())
     {
@@ -2674,7 +2788,159 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
         return;
     }
 
-    g_compose->Dispatch(cmdList, target, depth, motion, target, frame, timingQueue);
+    if (Config::Instance()->DlssNrBackend.value_or_default() == 1 && sycl == nullptr &&
+        Config::Instance()->DlssNrNativeAfterSubmit.value_or_default())
+    {
+        if (!Config::Instance()->DlssNrNativeOutputState.has_value())
+        {
+            ReportSkipOnce("native SYCL needs an explicit NativeOutputState");
+            return;
+        }
+        NativePending pending {};
+        pending.output = target;
+        pending.depth = depth;
+        pending.motion = motion;
+        pending.frame = frame;
+        // The exposure texture's state after the producer list is unknown.
+        pending.frame.ExposureTexture = nullptr;
+        std::lock_guard<std::mutex> lock(g_nativePendingMutex);
+        if (!g_nativePending.contains(cmdList) && g_nativePending.size() >= 16)
+        {
+            ReportSkipOnce("native SYCL has too many unsubmitted producer lists");
+            return;
+        }
+        g_nativePending[cmdList] = std::move(pending);
+        static bool reportedNativeRegistration = false;
+        if (!reportedNativeRegistration)
+        {
+            reportedNativeRegistration = true;
+            LOG_INFO("DLSS-NR native SYCL registered D3D12 producer list {:X}",
+                     reinterpret_cast<size_t>(cmdList));
+        }
+        return;
+    }
+
+    g_compose->Dispatch(cmdList, target, depth, motion, target, frame, timingQueue, sycl);
+}
+
+bool HasNativePending(ID3D12CommandList* list)
+{
+    std::lock_guard<std::mutex> lock(g_nativePendingMutex);
+    return g_nativePending.contains(list);
+}
+
+void ProcessNativeSubmission(ID3D12CommandQueue* queue, ID3D12CommandList* list)
+{
+    NativePending pending;
+    {
+        std::lock_guard<std::mutex> lock(g_nativePendingMutex);
+        auto it = g_nativePending.find(list);
+        if (it == g_nativePending.end())
+            return;
+        pending = std::move(it->second);
+        g_nativePending.erase(it);
+    }
+
+    std::lock_guard<std::mutex> runLock(g_nativeRunMutex);
+    if (queue == nullptr || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT ||
+        !Config::Instance()->DlssNrNativeOutputState.has_value())
+    {
+        ReportSkipOnce("native SYCL requires a direct queue and an explicit output state");
+        return;
+    }
+    static bool reportedNativeSubmission = false;
+    if (!reportedNativeSubmission)
+    {
+        reportedNativeSubmission = true;
+        LOG_INFO("DLSS-NR native SYCL producer submitted on queue {:X}; output state {}",
+                 reinterpret_cast<size_t>(queue), Config::Instance()->DlssNrNativeOutputState.value());
+    }
+
+    Microsoft::WRL::ComPtr<ID3D12Device> device;
+    if (FAILED(queue->GetDevice(IID_PPV_ARGS(&device))))
+        return;
+    const auto desc = pending.output->GetDesc();
+    float scale = std::clamp(Config::Instance()->DlssNrWorkingScale.value_or_default(), 0.25f, 2.0f);
+    const unsigned int width = static_cast<unsigned int>(desc.Width * scale + 0.5f);
+    const unsigned int height = static_cast<unsigned int>(desc.Height * scale + 0.5f);
+    if (!g_nativeProvider.Ready() || g_nativeProviderWidth != width || g_nativeProviderHeight != height)
+    {
+        const auto dir = Util::DllPath().parent_path();
+        const auto logical = dir / "arc_nr_weights" / "logical";
+        const auto derived = dir / "arc_nr_weights" / "derived";
+        std::string error;
+        if (!g_nativeProvider.Load(dir / "arc_nr_sycl.dll", error))
+        {
+            LOG_ERROR("DLSS-NR native SYCL load: {}", error);
+            return;
+        }
+        const auto logicalBytes = logical.u8string();
+        const auto derivedBytes = derived.u8string();
+        const std::string logicalUtf8(reinterpret_cast<const char*>(logicalBytes.data()), logicalBytes.size());
+        const std::string derivedUtf8(reinterpret_cast<const char*>(derivedBytes.data()), derivedBytes.size());
+        ArcNrSyclCreate create {};
+        create.struct_size = sizeof(create);
+        create.width = width;
+        create.height = height;
+        create.logical_weights_directory = logicalUtf8.c_str();
+        create.derived_weights_directory = derivedUtf8.c_str();
+        if (!g_nativeProvider.Create(create, error))
+        {
+            LOG_ERROR("DLSS-NR native SYCL create: {}", error);
+            return;
+        }
+        g_nativeProviderWidth = width;
+        g_nativeProviderHeight = height;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> ownedList;
+    HRESULT hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
+    if (SUCCEEDED(hr))
+        hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+                                       IID_PPV_ARGS(&ownedList));
+    if (FAILED(hr))
+    {
+        LOG_ERROR("DLSS-NR native SYCL owned list creation failed: 0x{:X}", static_cast<unsigned int>(hr));
+        return;
+    }
+
+    bool recording = true;
+    bool passCompleted = false;
+    SyclDispatchContext context {};
+    context.provider = &g_nativeProvider;
+    context.bridge = &g_nativeBridge;
+    context.allocator = allocator.Get();
+    context.listRecording = &recording;
+    context.hasOutputArrival = true;
+    context.freshOwnedList = true;
+    context.passCompleted = &passCompleted;
+    context.outputArrival = static_cast<D3D12_RESOURCE_STATES>(
+        Config::Instance()->DlssNrNativeOutputState.value());
+    g_compose->Dispatch(ownedList.Get(), pending.output.Get(), pending.depth.Get(),
+                        pending.motion.Get(), pending.output.Get(), pending.frame, queue, &context);
+    if (!recording || !passCompleted)
+    {
+        LOG_ERROR("DLSS-NR native SYCL did not finish its owned pass; skipping resolve submission");
+        return;
+    }
+    hr = ownedList->Close();
+    if (SUCCEEDED(hr))
+    {
+        ID3D12CommandList* lists[] = { ownedList.Get() };
+        queue->ExecuteCommandLists(1, lists);
+        std::string error;
+        if (!g_nativeBridge.Flush(device.Get(), queue, error))
+        {
+            // The GPU may still be using these objects after a timeout.
+            g_nativeTimedOutAllocators.push_back(allocator);
+            g_nativeTimedOutLists.push_back(ownedList);
+            g_nativeTimedOutOutputs.push_back(pending.output);
+            LOG_ERROR("DLSS-NR native SYCL final fence: {}", error);
+        }
+    }
+    else
+        LOG_ERROR("DLSS-NR native SYCL resolve Close failed: 0x{:X}", static_cast<unsigned int>(hr));
 }
 
 // The pass. Resources in, nothing read from anywhere the caller cannot see.
@@ -2814,7 +3080,11 @@ CalibrationReading Calibration()
     return r;
 }
 
-bool IsRunning() { return g_nr.feature != nullptr && !g_nr.failed; }
+bool IsRunning()
+{
+    return !g_nr.failed && (Config::Instance()->DlssNrBackend.value_or_default() == 1
+                                ? g_nr.syclRunning : g_nr.feature != nullptr);
+}
 
 const char* FailureReason() { return g_nr.failed ? g_nr.reason : ""; }
 
@@ -2845,7 +3115,13 @@ bool CaptureInProgress() { return g_capture.isActive(); }
 
 void Shutdown()
 {
-    std::lock_guard<std::mutex> nrLock(g_nrMutex);
+    std::scoped_lock locks(g_nativeRunMutex, g_nrMutex);
+    {
+        std::lock_guard<std::mutex> pendingLock(g_nativePendingMutex);
+        g_nativePending.clear();
+    }
+    g_nativeProvider.Reset();
+    g_nativeProviderWidth = g_nativeProviderHeight = 0;
 
     for (auto& r : g_nrRetired)
     {

@@ -1,3 +1,4 @@
+#include <pch.h>
 #include "ArcNrSyclLoader.h"
 
 #include <Windows.h>
@@ -28,7 +29,7 @@ bool ArcNrSyclLoader::Load(const std::filesystem::path& module_path,
         !get_api(ARC_NR_SYCL_API_VERSION, &api) ||
         api.version != ARC_NR_SYCL_API_VERSION ||
         api.create == nullptr || api.evaluate == nullptr ||
-        api.destroy == nullptr) {
+        api.destroy == nullptr || api.evaluate_gpu == nullptr) {
         FreeLibrary(module);
         error = "arc_nr_sycl.dll has an incompatible ABI";
         return false;
@@ -64,6 +65,20 @@ ArcNrSyclStatus ArcNrSyclLoader::Evaluate(const ArcNrSyclFrame& frame,
     }
     std::array<char, 512> diagnostic {};
     const ArcNrSyclStatus status = api_.evaluate(
+        session_, &frame, diagnostic.data(),
+        static_cast<uint32_t>(diagnostic.size()));
+    error = diagnostic.data();
+    return status;
+}
+
+ArcNrSyclStatus ArcNrSyclLoader::EvaluateGpu(const ArcNrSyclGpuFrame& frame,
+                                               std::string& error) {
+    if (!Ready()) {
+        error = "SYCL model session is not ready";
+        return ARC_NR_SYCL_MODEL_UNAVAILABLE;
+    }
+    std::array<char, 512> diagnostic {};
+    const ArcNrSyclStatus status = api_.evaluate_gpu(
         session_, &frame, diagnostic.data(),
         static_cast<uint32_t>(diagnostic.size()));
     error = diagnostic.data();

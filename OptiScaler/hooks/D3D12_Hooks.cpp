@@ -2240,6 +2240,11 @@ static void HookToDevice(ID3D12Device* InDevice)
 
     HookToCommandList(InDevice);
 
+    if (Config::Instance()->DlssNrEnabled.value_or_default() &&
+        Config::Instance()->DlssNrBackend.value_or_default() == 1 &&
+        Config::Instance()->DlssNrNativeAfterSubmit.value_or_default())
+        ResTrack_Dx12::HookQueueForNativeNr(InDevice);
+
     if (State::Instance().activeFgInput == FGInput::Upscaler &&
         !Config::Instance()->FGDisableHUDFix.value_or_default() &&
         State::Instance().swapchainInteropApi == SwapchainInteropApi::None)

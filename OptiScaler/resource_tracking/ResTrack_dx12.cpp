@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include <dlssnr/DlssNr_ExposureScan.h>
+#include <dlssnr/DlssNr.h>
 
 #include "ResTrack_dx12.h"
 
@@ -113,6 +114,46 @@ static PFN_ExecuteBundle o_ExecuteBundle = nullptr;
 static PFN_Close o_Close = nullptr;
 
 static PFN_ExecuteCommandLists o_ExecuteCommandLists = nullptr;
+static thread_local bool nativeNrSubmitting = false;
+static std::mutex nativeNrQueueMutex;
+
+static void ExecuteWithNativeNr(ID3D12CommandQueue* queue, UINT count,
+                                ID3D12CommandList* const* lists)
+{
+    if (nativeNrSubmitting || !Config::Instance()->DlssNrNativeAfterSubmit.value_or_default() ||
+        Config::Instance()->DlssNrBackend.value_or_default() != 1 || count == 0)
+    {
+        o_ExecuteCommandLists(queue, count, lists);
+        return;
+    }
+
+    UINT start = 0;
+    for (UINT i = 0; i < count; ++i)
+    {
+        if (!DlssNr::HasNativePending(lists[i]))
+            continue;
+        // Preserve ordering within a game's batch: submit through the producer
+        // list, run the owned-list SYCL pass, then submit remaining game lists.
+        o_ExecuteCommandLists(queue, i - start + 1, lists + start);
+        nativeNrSubmitting = true;
+        try
+        {
+            DlssNr::ProcessNativeSubmission(queue, lists[i]);
+        }
+        catch (const std::exception& e)
+        {
+            LOG_ERROR("DLSS-NR native SYCL submission failed: {}", e.what());
+        }
+        catch (...)
+        {
+            LOG_ERROR("DLSS-NR native SYCL submission failed with an unknown exception");
+        }
+        nativeNrSubmitting = false;
+        start = i + 1;
+    }
+    if (start < count)
+        o_ExecuteCommandLists(queue, count - start, lists + start);
+}
 static PFN_Release o_Release = nullptr;
 
 static PFN_OMSetRenderTargets o_OMSetRenderTargets = nullptr;
@@ -639,6 +680,15 @@ void ResTrack_Dx12::hkCreateUnorderedAccessView(ID3D12Device* This, ID3D12Resour
 void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumCommandLists,
                                           ID3D12CommandList* const* ppCommandLists)
 {
+    if (nativeNrSubmitting)
+    {
+        o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);
+        return;
+    }
+    std::unique_lock<std::mutex> nativeQueueLock(nativeNrQueueMutex, std::defer_lock);
+    if (Config::Instance()->DlssNrNativeAfterSubmit.value_or_default() &&
+        Config::Instance()->DlssNrBackend.value_or_default() == 1)
+        nativeQueueLock.lock();
     auto fg = State::Instance().currentFG;
 
     if (fg != nullptr && fg->IsActive() && !fg->IsPaused())
@@ -695,7 +745,7 @@ void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumComm
 
         if (!found.empty())
         {
-            o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);
+            ExecuteWithNativeNr(This, NumCommandLists, ppCommandLists);
 
             for (size_t i = 0; i < found.size(); i++)
             {
@@ -708,7 +758,7 @@ void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumComm
 
     LOG_TRACK("Done NumCommandLists: {}", NumCommandLists);
 
-    o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);
+    ExecuteWithNativeNr(This, NumCommandLists, ppCommandLists);
 }
 
 #pragma region Heap hooks
@@ -1913,6 +1963,11 @@ void ResTrack_Dx12::HookToQueue(ID3D12Device* InDevice)
 
         queue->Release();
     }
+}
+
+void ResTrack_Dx12::HookQueueForNativeNr(ID3D12Device* device)
+{
+    HookToQueue(device);
 }
 
 void ResTrack_Dx12::HookDevice(ID3D12Device* device)

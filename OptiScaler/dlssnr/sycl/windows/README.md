@@ -1,11 +1,9 @@
 # Windows SYCL provider test (native D3D12 integration gate)
 
 This package gives you a **runnable Windows test of `arc_nr_sycl.dll`**, using
-the exact `nvngx_dlssnr.dll` you supply. It does **not** enable the SYCL backend
-inside a native D3D12 game yet. `DlssNr_Dx12::Dispatch` still records encode,
-model evaluation and resolve in the game's open command list. Submitting or
-resetting that list from OptiScaler would violate game ownership. The
-OptiScaler-owned-list bridge is for D3D11/Vulkan translation paths only.
+the exact `nvngx_dlssnr.dll` you supply. The native D3D12 queue submission
+path is opt-in and requires a verified post-upscaler boundary and output
+resource state. The smoke test alone does not establish either fact.
 
 ## Prerequisites
 
@@ -18,7 +16,8 @@ OptiScaler-owned-list bridge is for D3D11/Vulkan translation paths only.
 - Enough free space for the 165 MB model DLL, private extraction, hundreds of
   weight files, a Python venv and a full optimized C++ build.
 
-Get the two source branches in separate directories:
+Get the two source branches in separate directories, or use a ZIP of the SNR
+`sycl-native-runtime` branch:
 
 ```powershell
 git clone --branch sycl-native-backend --recurse-submodules https://github.com/gengar-maker/OptiScaler.git C:\src\OptiScaler-SYCL
@@ -39,9 +38,10 @@ derived tensors, builds `arc_nr_sycl.dll`, and evaluates a deterministic
 320×320 RGBA16F image. Success prints finite, non-black RGB statistics and
 leaves the input/output raw frames and provider DLL under `OutputRoot`.
 The script fails instead of silently falling back to NVIDIA.
-It also requires the decoded logical-weight SHA-256 to match the model used
-for the SYCL graph; a different game DLL will stop with a clear error instead
-of being run with an incompatible model.
+The script reports the decoded logical-weight SHA-256. A different checkpoint
+is accepted if weight preparation and GPU inference pass; its visual match to
+the known checkpoint still needs image comparison. The DLL's file hash alone
+does not establish whether its tensor contract changed.
 
 If CMake cannot locate oneDNN, pass the actual SYCL-enabled oneDNN install
 paths as `-DnnlIncludeDir C:\...\include` and
@@ -64,16 +64,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\src\OptiScaler-SYCL\OptiS
 The game root may also be its `b1\Binaries\Win64` directory. Review the JSON
 before sharing it: it includes local file paths, filenames, sizes and hashes,
 but no model binaries or weight bytes. Do not overwrite the Swapper-installed
-OptiScaler files with this branch yet; the native D3D12 SYCL dispatch is not
-wired and the two package layouts may differ.
+OptiScaler files until the game's command-list boundary and output state have
+been checked and the package layout has been reviewed.
 
 ## Native D3D12 in-game gate
 
 The provider test above establishes only that the model DLL and weights run
-on your Intel GPU. To safely run it *in the same frame* inside your native
-D3D12 game, we still need a proven host-controlled boundary after the game's
-upscaler work has been submitted, before its UI/final output is recorded, and
-the exact output resource state at that boundary. The existing
-`ExecuteCommandLists` hook sees submission, but by itself cannot separate
-commands already recorded together in the game-owned list. No menu toggle or
-DLL swap in this branch claims to solve that scheduling problem.
+on your Intel GPU. The native path submits the game producer list, runs the
+owned-list SYCL pass with explicit D3D12 fences, then submits any remaining
+game lists. It requires the output's `D3D12_RESOURCE_STATES` value after the
+producer list and proof that no consumer runs later in that same list. A GPU
+frame capture is needed to validate those conditions for Wukong before
+enabling `[DlssNr] NativeAfterSubmit=true` and setting `NativeOutputState`.

@@ -12,12 +12,11 @@
 //
 // Only call this for a command list and allocator owned by OptiScaler. On
 // success the producer list has been submitted, the SYCL model has finished,
-// its answer has been uploaded, and the SAME list/allocator have been reset
+// its answer has been copied from a shared GPU buffer, and the SAME list/allocator have been reset
 // into recording state for the caller's subsequent resolve and copy-back.
 //
 // This is deliberately not used for a game's open D3D12 command list. It
-// stalls twice and copies via host memory; a shared-buffer implementation can
-// optimize the same contract after Windows correctness tests pass.
+// stalls twice for explicit queue fences and uses D3D12/SYCL shared GPU heaps.
 // If Run fails after submitting the producer and its fence does not complete,
 // the owned list remains closed and its allocator must not be reset. Callers
 // must treat that as a frame-fatal error, not attempt normal close/submit.
@@ -39,6 +38,10 @@ public:
              ArcNrSyclFrame frame,
              bool& list_recording,
              std::string& error);
+    bool Flush(ID3D12Device* device, ID3D12CommandQueue* queue, std::string& error)
+    {
+        return WaitForQueue(device, queue, error);
+    }
 
 private:
     bool WaitForQueue(ID3D12Device* device, ID3D12CommandQueue* queue,

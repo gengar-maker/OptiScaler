@@ -21,8 +21,8 @@ $dll = (Resolve-Path -LiteralPath $ModelDll).Path
 if (-not (Test-Path -LiteralPath (Join-Path $snr "runtime\CMakeLists.txt") -PathType Leaf)) {
     throw "SnrRoot must be the SNR sycl-native-runtime repository root"
 }
-if ((git -C $snr branch --show-current) -ne "sycl-native-runtime") {
-    throw "SNR must be checked out on sycl-native-runtime"
+if (-not (Test-Path -LiteralPath (Join-Path $snr "runtime\include\arc_nr\mlx_model.hpp") -PathType Leaf)) {
+    throw "SnrRoot needs the sycl-native-runtime model headers (a branch checkout or extracted ZIP)"
 }
 if (Test-Path -LiteralPath $OutputRoot) {
     throw "OutputRoot already exists; choose a NEW private directory"
@@ -59,7 +59,7 @@ $logicalHash = (Get-FileHash -LiteralPath $logicalTensor -Algorithm SHA256).Hash
 $expectedLogicalHash = "66348ca3319b36beebc4ccb27c9ec8e90a41d87ce00ff8e6eb0d9c886784cdbe"
 Write-Host "Logical model SHA-256: $logicalHash"
 if ($logicalHash -ne $expectedLogicalHash) {
-    throw "The game DLL decoded to a different model; this SYCL graph/weight contract is pinned to $expectedLogicalHash"
+    Write-Warning "This is an unrecognized checkpoint. Weight preparation and GPU inference will validate its tensor contract, but visual parity with the known checkpoint is unproven."
 }
 Push-Location $snr
 try {

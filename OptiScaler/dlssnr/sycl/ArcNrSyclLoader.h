@@ -19,6 +19,7 @@ public:
     bool Load(const std::filesystem::path& module_path, std::string& error);
     bool Create(const ArcNrSyclCreate& create, std::string& error);
     ArcNrSyclStatus Evaluate(const ArcNrSyclFrame& frame, std::string& error);
+    ArcNrSyclStatus EvaluateGpu(const ArcNrSyclGpuFrame& frame, std::string& error);
     void Reset();
     bool Ready() const { return module_ != nullptr && session_ != nullptr; }
 

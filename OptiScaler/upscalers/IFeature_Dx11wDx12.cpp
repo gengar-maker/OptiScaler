@@ -4,6 +4,7 @@
 #include <dlssnr/DlssNr.h>
 
 #include <Config.h>
+#include <Util.h>
 
 #include <proxies/DXGI_Proxy.h>
 #include <proxies/D3D12_Proxy.h>
@@ -84,6 +85,9 @@ bool IFeature_Dx11wDx12::CreateD3D12Objects()
 
 void IFeature_Dx11wDx12::ReleaseSharedResources()
 {
+    NrSyclProvider.Reset();
+    NrSyclWidth = NrSyclHeight = 0;
+    NrSyclFailed = false;
     for (size_t i = 0; i < DX11WDX12_NUM_OF_BUFFERS; i++)
     {
         SAFE_RELEASE(Dx12CommandList[i]);
@@ -101,6 +105,60 @@ void IFeature_Dx11wDx12::ReleaseSharedResources()
     }
 
     // SAFE_RELEASE(Dx12Device);
+}
+
+bool IFeature_Dx11wDx12::PrepareNrSycl(ID3D12Resource* output)
+{
+    if (NrSyclFailed || output == nullptr)
+        return false;
+    const auto desc = output->GetDesc();
+    float scale = Config::Instance()->DlssNrWorkingScale.value_or_default();
+    scale = std::clamp(scale, 0.25f, 2.0f);
+    const UINT width = static_cast<UINT>(desc.Width * scale + 0.5f);
+    const UINT height = static_cast<UINT>(desc.Height * scale + 0.5f);
+    if (NrSyclProvider.Ready() && NrSyclWidth == width && NrSyclHeight == height)
+        return true;
+
+    const auto dllDir = Util::DllPath().parent_path();
+    const auto weights = dllDir / "arc_nr_weights";
+    const auto logical = weights / "logical";
+    const auto derived = weights / "derived";
+    const auto provider = dllDir / "arc_nr_sycl.dll";
+    if (!std::filesystem::is_directory(logical) || !std::filesystem::is_directory(derived))
+    {
+        LOG_ERROR("DLSS-NR SYCL: expected arc_nr_weights/logical and derived beside OptiScaler");
+        NrSyclFailed = true;
+        return false;
+    }
+
+    std::string error;
+    if (!NrSyclProvider.Load(provider, error))
+    {
+        LOG_ERROR("DLSS-NR SYCL: {}", error);
+        NrSyclFailed = true;
+        return false;
+    }
+    const auto logicalBytes = logical.u8string();
+    const auto derivedBytes = derived.u8string();
+    const std::string logicalUtf8(reinterpret_cast<const char*>(logicalBytes.data()), logicalBytes.size());
+    const std::string derivedUtf8(reinterpret_cast<const char*>(derivedBytes.data()), derivedBytes.size());
+    ArcNrSyclCreate create {};
+    create.struct_size = sizeof(create);
+    create.width = width;
+    create.height = height;
+    create.logical_weights_directory = logicalUtf8.c_str();
+    create.derived_weights_directory = derivedUtf8.c_str();
+    if (!NrSyclProvider.Create(create, error))
+    {
+        LOG_ERROR("DLSS-NR SYCL: model create failed: {}", error);
+        NrSyclProvider.Reset();
+        NrSyclFailed = true;
+        return false;
+    }
+    NrSyclWidth = width;
+    NrSyclHeight = height;
+    LOG_INFO("DLSS-NR SYCL: model ready at {}x{}", width, height);
+    return true;
 }
 
 bool IFeature_Dx11wDx12::ProcessDx11Textures(const NVSDK_NGX_Parameter* InParameters)
@@ -475,13 +533,25 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
 
         if (dx12EvalResult && Config::Instance()->DlssNrEnabled.value_or_default())
         {
-            DlssNr::EvaluateAfterUpscale(cmdList, InParameters, Dx12CommandQueue);
-
-            // Asked only after the D3D12 path has had its turn. Probing first would have made a D3D11
-            // init the very first thing to ever touch the snippet, and if that had left its core
-            // holding a D3D11 device the D3D12 create would have failed -- killing the feature in
-            // exactly the games the probe was written to help. Off by default regardless.
-            DlssNr::ProbeD3D11(Dx11Device);
+            if (Config::Instance()->DlssNrBackend.value_or_default() == 1)
+            {
+                if (PrepareNrSycl(dx11Out.Dx12Resource))
+                {
+                    DlssNr::SyclDispatchContext sycl {};
+                    sycl.provider = &NrSyclProvider;
+                    sycl.bridge = &NrSyclBridge;
+                    sycl.allocator = Dx12CommandAllocator[frame];
+                    sycl.listRecording = &commandListRecording;
+                    DlssNr::EvaluateAfterUpscale(cmdList, InParameters, Dx12CommandQueue, &sycl);
+                    if (!commandListRecording)
+                        dx12EvalResult = false;
+                }
+            }
+            else
+            {
+                DlssNr::EvaluateAfterUpscale(cmdList, InParameters, Dx12CommandQueue);
+                DlssNr::ProbeD3D11(Dx11Device);
+            }
         }
 
     } while (false);

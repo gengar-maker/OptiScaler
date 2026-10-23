@@ -1,6 +1,7 @@
 #include "ArcNrSyclApi.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <exception>
@@ -12,6 +13,7 @@
 #include <utility>
 
 #include <sycl/sycl.hpp>
+#include <sycl/ext/oneapi/bindless_images.hpp>
 
 #include "arc_nr/device_buffer.hpp"
 #include "arc_nr/device_context.hpp"
@@ -25,6 +27,8 @@
 #endif
 
 namespace {
+
+namespace external = sycl::ext::oneapi::experimental;
 
 static_assert(sizeof(sycl::half) == sizeof(uint16_t));
 
@@ -57,6 +61,8 @@ struct Session {
     arc_nr::DeviceContext context;
     arc_nr::MlxFramePipeline frame;
     arc_nr::MlxModelPlan model;
+    const uint32_t image_width;
+    const uint32_t image_height;
     const std::size_t pixels;
     const std::size_t network_pixels;
     arc_nr::DeviceBuffer<sycl::half> color;
@@ -73,6 +79,8 @@ struct Session {
           frame(context.queue(), width, height),
           model(context, frame.network_height(), frame.network_width(),
                 logical, derived),
+          image_width(width),
+          image_height(height),
           pixels(static_cast<std::size_t>(width) * height),
           network_pixels(static_cast<std::size_t>(frame.network_width()) *
                          frame.network_height()),
@@ -175,6 +183,143 @@ ArcNrSyclStatus Evaluate(void* opaque, const ArcNrSyclFrame* input,
 
 void Destroy(void* session) { delete static_cast<Session*>(session); }
 
+class ImportedHeap {
+public:
+    ImportedHeap(sycl::queue& queue, void* handle, uint64_t bytes)
+        : queue_(queue) {
+        external::external_mem_descriptor<external::resource_win32_handle>
+            descriptor {{handle}, external::external_mem_handle_type::win32_nt_handle,
+                        static_cast<size_t>(bytes)};
+        memory_ = external::import_external_memory(descriptor, queue_);
+        imported_ = true;
+        data_ = static_cast<sycl::half*>(external::map_external_linear_memory(
+            memory_, 0, bytes, queue_));
+    }
+    ~ImportedHeap() {
+        try {
+            if (data_ != nullptr) external::unmap_external_linear_memory(data_, queue_);
+            if (imported_) external::release_external_memory(memory_, queue_);
+        } catch (...) {}
+    }
+    ImportedHeap(const ImportedHeap&) = delete;
+    ImportedHeap& operator=(const ImportedHeap&) = delete;
+    sycl::half* data() const { return data_; }
+private:
+    sycl::queue& queue_;
+    external::external_mem memory_ {};
+    bool imported_ = false;
+    sycl::half* data_ = nullptr;
+};
+
+ArcNrSyclStatus EvaluateGpu(void* opaque, const ArcNrSyclGpuFrame* input,
+                             char* error, uint32_t error_bytes) {
+    if (opaque == nullptr || input == nullptr ||
+        input->struct_size != sizeof(*input) ||
+        input->controls.struct_size != sizeof(ArcNrSyclFrame) ||
+        input->color_heap_nt_handle == nullptr ||
+        input->output_heap_nt_handle == nullptr ||
+        input->row_pitch_bytes == 0 ||
+        (input->row_pitch_bytes & 7u) != 0) {
+        Error(error, error_bytes, "invalid shared GPU frame");
+        return ARC_NR_SYCL_INVALID_ARGUMENT;
+    }
+    auto& session = *static_cast<Session*>(opaque);
+    const uint64_t minimum_bytes =
+        static_cast<uint64_t>(session.pixels) * sizeof(sycl::half) * 4;
+    if (input->heap_bytes < minimum_bytes) {
+        Error(error, error_bytes, "shared GPU heap is too small");
+        return ARC_NR_SYCL_INVALID_ARGUMENT;
+    }
+    std::lock_guard<std::mutex> lock(session.mutex);
+    try {
+        using Clock = std::chrono::steady_clock;
+        const auto elapsed_us = [](Clock::time_point begin,
+                                   Clock::time_point end) -> uint64_t {
+            return static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count());
+        };
+        const auto start = Clock::now();
+        auto& queue = session.context.queue();
+        Clock::time_point imported, copied_input, prepared, modeled, composed,
+                          copied_output;
+        {
+        ImportedHeap color_heap(queue, input->color_heap_nt_handle,
+                                input->heap_bytes);
+        ImportedHeap output_heap(queue, input->output_heap_nt_handle,
+                                 input->heap_bytes);
+        imported = Clock::now();
+        const auto* source = color_heap.data();
+        auto* destination = output_heap.data();
+        auto* color = session.color.data();
+        const size_t row_elements = input->row_pitch_bytes / sizeof(sycl::half);
+        const size_t image_width = session.image_width;
+        const size_t image_height = session.image_height;
+        if (row_elements < image_width * 4 ||
+            input->heap_bytes < row_elements * image_height * sizeof(sycl::half))
+            throw std::runtime_error("shared GPU heap footprint is too small");
+        queue.parallel_for(sycl::range<1>(session.pixels * 4),
+                           [=](sycl::id<1> id) {
+            const size_t i = id[0];
+            color[i] = source[(i / (image_width * 4)) * row_elements +
+                              i % (image_width * 4)];
+        }).wait_and_throw();
+        copied_input = Clock::now();
+        arc_nr::MlxFrameControls controls;
+        controls.frame_index = input->controls.frame_index;
+        controls.normalized_style = input->controls.normalized_style;
+        controls.local_tone = input->controls.local_tone;
+        controls.local_structure = input->controls.local_structure;
+        controls.skin_structure = input->controls.skin_structure;
+        controls.automatic_structure = input->controls.automatic_structure;
+        controls.intensity = input->controls.intensity;
+        session.frame.Prepare(session.color.data(), nullptr, nullptr, nullptr,
+                              controls, session.features.data()).wait_and_throw();
+        prepared = Clock::now();
+        session.model.Execute(session.features.data(), session.head.data());
+        queue.wait_and_throw();
+        modeled = Clock::now();
+        session.frame.Compose(session.color.data(), session.head.data(),
+                              session.features.data(), nullptr, false,
+                              controls, session.output.data()).wait_and_throw();
+        composed = Clock::now();
+        const auto* output = session.output.data();
+        if (row_elements == image_width * 4) {
+            queue.memcpy(destination, output, session.output.size_bytes())
+                .wait_and_throw();
+        } else {
+            queue.parallel_for(sycl::range<1>(session.pixels * 4),
+                               [=](sycl::id<1> id) {
+                const size_t i = id[0];
+                destination[(i / (image_width * 4)) * row_elements +
+                            i % (image_width * 4)] = output[i];
+            }).wait_and_throw();
+        }
+        copied_output = Clock::now();
+        }
+        const auto released = Clock::now();
+        if (input->timings != nullptr) {
+            *input->timings = ArcNrSyclGpuTimings {
+                elapsed_us(start, imported),
+                elapsed_us(imported, copied_input),
+                elapsed_us(copied_input, prepared),
+                elapsed_us(prepared, modeled),
+                elapsed_us(modeled, composed),
+                elapsed_us(composed, copied_output),
+                elapsed_us(copied_output, released),
+                elapsed_us(start, released),
+            };
+        }
+        Error(error, error_bytes, "");
+        return ARC_NR_SYCL_OK;
+    } catch (const std::exception& e) {
+        Error(error, error_bytes, e.what());
+        return ARC_NR_SYCL_INFERENCE_FAILED;
+    } catch (...) {
+        Error(error, error_bytes, "unknown shared GPU inference failure");
+        return ARC_NR_SYCL_INFERENCE_FAILED;
+    }
+}
+
 }  // namespace
 
 extern "C" ARC_NR_EXPORT int arc_nr_sycl_get_api(
@@ -186,5 +331,6 @@ extern "C" ARC_NR_EXPORT int arc_nr_sycl_get_api(
     out_api->create = Create;
     out_api->evaluate = Evaluate;
     out_api->destroy = Destroy;
+    out_api->evaluate_gpu = EvaluateGpu;
     return 1;
 }

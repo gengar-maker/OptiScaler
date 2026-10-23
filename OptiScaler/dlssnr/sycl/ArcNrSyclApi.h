@@ -2,14 +2,12 @@
 
 // Versioned C boundary between OptiScaler (MSVC/D3D12) and a separately
 // compiled Intel oneAPI SYCL/oneDNN neural-rendering module. This interface
-// deliberately uses linear host buffers. A D3D12 readback/upload bridge may
-// implement it first; a shared-buffer fast path can be added in a new ABI
-// version without changing the neural model's tensor contract.
+// supports both host test buffers and Windows NT shared GPU heap handles.
 //
-// IMPORTANT: calling Evaluate from an open D3D12 command list is invalid.
-// The colour data must be read back only after the list that produced it has
-// completed. Likewise, D3D12 may consume the output only after Evaluate has
-// returned. The host is responsible for those fences and resource states.
+// IMPORTANT: calling EvaluateGpu from an open D3D12 command list is invalid.
+// The producer list must complete before SYCL accesses the shared heap.
+// D3D12 may consume output only after EvaluateGpu has returned. The host
+// owns both fences and all resource-state transitions.
 
 #include <stdint.h>
 
@@ -17,7 +15,7 @@
 extern "C" {
 #endif
 
-#define ARC_NR_SYCL_API_VERSION 1u
+#define ARC_NR_SYCL_API_VERSION 3u
 #define ARC_NR_SYCL_GET_API_NAME "arc_nr_sycl_get_api"
 
 typedef enum ArcNrSyclStatus {
@@ -61,6 +59,33 @@ typedef struct ArcNrSyclFrame {
     float intensity;
 } ArcNrSyclFrame;
 
+// Both handles refer to D3D12 cross-adapter shared heaps. Each contains a
+// placed buffer at offset zero with D3D12's RGBA16F copyable footprint.
+// The caller waits for the input D3D12 copy before EvaluateGpu, then submits
+// the output D3D12 copy only after EvaluateGpu returns. No host pixel transfer.
+typedef struct ArcNrSyclGpuTimings {
+    uint64_t import_us;
+    uint64_t input_us;
+    uint64_t prepare_us;
+    uint64_t model_us;
+    uint64_t compose_us;
+    uint64_t output_us;
+    uint64_t release_us;
+    uint64_t total_us;
+} ArcNrSyclGpuTimings;
+
+typedef struct ArcNrSyclGpuFrame {
+    uint32_t struct_size;
+    ArcNrSyclFrame controls;
+    void* color_heap_nt_handle;
+    void* output_heap_nt_handle;
+    uint64_t heap_bytes;
+    uint32_t row_pitch_bytes;
+    uint32_t reserved;
+    // Optional caller-owned timing output. All values include GPU waits.
+    ArcNrSyclGpuTimings* timings;
+} ArcNrSyclGpuFrame;
+
 typedef struct ArcNrSyclApi {
     uint32_t struct_size;
     uint32_t version;
@@ -71,6 +96,9 @@ typedef struct ArcNrSyclApi {
     ArcNrSyclStatus (*evaluate)(void* session, const ArcNrSyclFrame* frame,
                                  char* error, uint32_t error_bytes);
     void (*destroy)(void* session);
+    ArcNrSyclStatus (*evaluate_gpu)(void* session,
+                                    const ArcNrSyclGpuFrame* frame,
+                                    char* error, uint32_t error_bytes);
 } ArcNrSyclApi;
 
 // Exported by arc_nr_sycl.dll. Returns 1 only when the version, size, and

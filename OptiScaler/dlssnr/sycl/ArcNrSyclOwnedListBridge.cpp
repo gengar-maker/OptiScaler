@@ -1,10 +1,11 @@
+#include <pch.h>
 #include "ArcNrSyclOwnedListBridge.h"
 
 #include <Windows.h>
 
 #include <algorithm>
-#include <cstring>
-#include <vector>
+#include <atomic>
+#include <chrono>
 
 namespace {
 
@@ -32,6 +33,7 @@ D3D12_RESOURCE_DESC BufferDesc(UINT64 bytes) {
     desc.Format = DXGI_FORMAT_UNKNOWN;
     desc.SampleDesc.Count = 1;
     desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER;
     return desc;
 }
 
@@ -132,7 +134,7 @@ bool ArcNrSyclOwnedListBridge::Run(
     if (width == 0 || height == 0 || width > 8192 || height > 8192 ||
         !IsRgba16Texture(model_color, width, height) ||
         !IsRgba16Texture(model_output, width, height)) {
-        error = "SYCL same-frame staging needs matching single-sample RGBA16F textures";
+        error = "SYCL shared GPU path needs matching single-sample RGBA16F textures";
         return false;
     }
     if (queue->GetDesc().Type != owned_list->GetType() ||
@@ -151,31 +153,74 @@ bool ArcNrSyclOwnedListBridge::Run(
         error = "unexpected RGBA16F copy footprint";
         return false;
     }
-    const auto readback_heap = Heap(D3D12_HEAP_TYPE_READBACK);
-    const auto upload_heap = Heap(D3D12_HEAP_TYPE_UPLOAD);
     const auto buffer_desc = BufferDesc(total_bytes);
-    ComPtr<ID3D12Resource> readback, upload;
-    HRESULT result = device->CreateCommittedResource(
-        &readback_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
-        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback));
-    if (FAILED(result)) {
-        error = HResult("readback allocation", result);
+    const auto allocation = device->GetResourceAllocationInfo(0, 1, &buffer_desc);
+    if (allocation.SizeInBytes == UINT64_MAX) {
+        error = "invalid shared GPU buffer allocation";
         return false;
     }
-    result = device->CreateCommittedResource(
-        &upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
-        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload));
+    using Clock = std::chrono::steady_clock;
+    const auto profile_start = Clock::now();
+    const auto milliseconds = [](Clock::time_point begin,
+                                 Clock::time_point end) {
+        return std::chrono::duration<double, std::milli>(end - begin).count();
+    };
+    D3D12_HEAP_DESC heap_desc {};
+    heap_desc.SizeInBytes = allocation.SizeInBytes;
+    heap_desc.Alignment = allocation.Alignment;
+    heap_desc.Properties = Heap(D3D12_HEAP_TYPE_DEFAULT);
+    heap_desc.Flags = D3D12_HEAP_FLAG_SHARED |
+                      D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER;
+    ComPtr<ID3D12Heap> color_heap, output_heap;
+    ComPtr<ID3D12Resource> color_buffer, output_buffer;
+    HRESULT result = device->CreateHeap(&heap_desc, IID_PPV_ARGS(&color_heap));
     if (FAILED(result)) {
-        error = HResult("upload allocation", result);
+        error = HResult("shared color heap allocation", result);
         return false;
     }
+    result = device->CreateHeap(&heap_desc, IID_PPV_ARGS(&output_heap));
+    if (FAILED(result)) {
+        error = HResult("shared output heap allocation", result);
+        return false;
+    }
+    result = device->CreatePlacedResource(
+        color_heap.Get(), 0, &buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr, IID_PPV_ARGS(&color_buffer));
+    if (FAILED(result)) {
+        error = HResult("shared color buffer allocation", result);
+        return false;
+    }
+    result = device->CreatePlacedResource(
+        output_heap.Get(), 0, &buffer_desc, D3D12_RESOURCE_STATE_COPY_SOURCE,
+        nullptr, IID_PPV_ARGS(&output_buffer));
+    if (FAILED(result)) {
+        error = HResult("shared output buffer allocation", result);
+        return false;
+    }
+    struct SharedHandle {
+        HANDLE value = nullptr;
+        ~SharedHandle() { if (value != nullptr) CloseHandle(value); }
+    } color_handle, output_handle;
+    result = device->CreateSharedHandle(color_heap.Get(), nullptr, GENERIC_ALL,
+                                        nullptr, &color_handle.value);
+    if (FAILED(result)) {
+        error = HResult("shared color handle", result);
+        return false;
+    }
+    result = device->CreateSharedHandle(output_heap.Get(), nullptr, GENERIC_ALL,
+                                        nullptr, &output_handle.value);
+    if (FAILED(result)) {
+        error = HResult("shared output handle", result);
+        return false;
+    }
+    const auto allocated = Clock::now();
 
     D3D12_TEXTURE_COPY_LOCATION source {};
     source.pResource = model_color;
     source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     source.SubresourceIndex = 0;
     D3D12_TEXTURE_COPY_LOCATION destination {};
-    destination.pResource = readback.Get();
+    destination.pResource = color_buffer.Get();
     destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     destination.PlacedFootprint = footprint;
     Transition(owned_list, model_color, color_state,
@@ -194,9 +239,10 @@ bool ArcNrSyclOwnedListBridge::Run(
     ID3D12CommandList* producer_lists[] = { owned_list };
     queue->ExecuteCommandLists(1, producer_lists);
     if (!WaitForQueue(device, queue, error)) return false;
+    const auto producer_ready = Clock::now();
 
     // From here the producer submission is complete and the caller's list is
-    // closed. Restore it to recording state even when CPU staging or inference
+    // closed. Restore it to recording state even when GPU import or inference
     // fails, so the bridge caller can finish its own list without recording
     // against a closed object. A failed fence wait above is different: the
     // allocator may still be in use and must not be reset.
@@ -212,49 +258,18 @@ bool ArcNrSyclOwnedListBridge::Run(
         return false;
     };
 
-    const std::size_t packed_row = static_cast<std::size_t>(row_bytes);
-    std::vector<uint16_t> packed_color(static_cast<std::size_t>(width) *
-                                       height * 4);
-    std::vector<uint16_t> packed_output(packed_color.size());
-    void* mapped = nullptr;
-    D3D12_RANGE read_range { 0, static_cast<SIZE_T>(total_bytes) };
-    result = readback->Map(0, &read_range, &mapped);
-    if (FAILED(result) || mapped == nullptr) {
-        return fail_after_producer(mapped == nullptr && SUCCEEDED(result)
-            ? "readback Map returned a null pointer"
-            : HResult("readback Map", result));
-    }
-    for (UINT y = 0; y < height; ++y)
-        std::memcpy(reinterpret_cast<unsigned char*>(packed_color.data()) +
-                        static_cast<std::size_t>(y) * packed_row,
-                    static_cast<const unsigned char*>(mapped) +
-                        footprint.Offset + static_cast<std::size_t>(y) *
-                                               footprint.Footprint.RowPitch,
-                    packed_row);
-    D3D12_RANGE no_write { 0, 0 };
-    readback->Unmap(0, &no_write);
-
-    frame.color_rgba_f16 = packed_color.data();
-    frame.output_rgba_f16 = packed_output.data();
-    if (provider.Evaluate(frame, error) != ARC_NR_SYCL_OK)
+    ArcNrSyclGpuFrame gpu_frame {};
+    gpu_frame.struct_size = sizeof(gpu_frame);
+    gpu_frame.controls = frame;
+    gpu_frame.color_heap_nt_handle = color_handle.value;
+    gpu_frame.output_heap_nt_handle = output_handle.value;
+    gpu_frame.heap_bytes = allocation.SizeInBytes;
+    gpu_frame.row_pitch_bytes = footprint.Footprint.RowPitch;
+    ArcNrSyclGpuTimings sycl_timings {};
+    gpu_frame.timings = &sycl_timings;
+    if (provider.EvaluateGpu(gpu_frame, error) != ARC_NR_SYCL_OK)
         return fail_after_producer(error);
-
-    D3D12_RANGE no_read { 0, 0 };
-    result = upload->Map(0, &no_read, &mapped);
-    if (FAILED(result) || mapped == nullptr) {
-        return fail_after_producer(mapped == nullptr && SUCCEEDED(result)
-            ? "upload Map returned a null pointer"
-            : HResult("upload Map", result));
-    }
-    for (UINT y = 0; y < height; ++y)
-        std::memcpy(static_cast<unsigned char*>(mapped) + footprint.Offset +
-                        static_cast<std::size_t>(y) *
-                            footprint.Footprint.RowPitch,
-                    reinterpret_cast<const unsigned char*>(packed_output.data()) +
-                        static_cast<std::size_t>(y) * packed_row,
-                    packed_row);
-    D3D12_RANGE write_range { 0, static_cast<SIZE_T>(total_bytes) };
-    upload->Unmap(0, &write_range);
+    const auto provider_ready = Clock::now();
 
     ComPtr<ID3D12CommandAllocator> upload_allocator;
     ComPtr<ID3D12GraphicsCommandList> upload_list;
@@ -269,7 +284,7 @@ bool ArcNrSyclOwnedListBridge::Run(
             HResult("upload command list creation", result));
     }
     source = {};
-    source.pResource = upload.Get();
+    source.pResource = output_buffer.Get();
     source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     source.PlacedFootprint = footprint;
     destination = {};
@@ -288,6 +303,7 @@ bool ArcNrSyclOwnedListBridge::Run(
     ID3D12CommandList* upload_lists[] = { upload_list.Get() };
     queue->ExecuteCommandLists(1, upload_lists);
     if (!WaitForQueue(device, queue, error)) return false;
+    const auto output_ready = Clock::now();
 
     result = owned_allocator->Reset();
     if (SUCCEEDED(result))
@@ -297,6 +313,24 @@ bool ArcNrSyclOwnedListBridge::Run(
         return false;
     }
     list_recording = true;
+    static std::atomic<unsigned int> profile_frame {0};
+    const unsigned int frame_number = profile_frame.fetch_add(1);
+    if (frame_number == 0 || frame_number % 30 == 0) {
+        LOG_INFO("NR-PROFILE frame={} {}x{} alloc={:.2f}ms producer={:.2f}ms provider={:.2f}ms output={:.2f}ms; SYCL import={:.2f} input={:.2f} prepare={:.2f} model={:.2f} compose={:.2f} export={:.2f} release={:.2f} total={:.2f}ms",
+                 frame_number, width, height,
+                 milliseconds(profile_start, allocated),
+                 milliseconds(allocated, producer_ready),
+                 milliseconds(producer_ready, provider_ready),
+                 milliseconds(provider_ready, output_ready),
+                 sycl_timings.import_us / 1000.0,
+                 sycl_timings.input_us / 1000.0,
+                 sycl_timings.prepare_us / 1000.0,
+                 sycl_timings.model_us / 1000.0,
+                 sycl_timings.compose_us / 1000.0,
+                 sycl_timings.output_us / 1000.0,
+                 sycl_timings.release_us / 1000.0,
+                 sycl_timings.total_us / 1000.0);
+    }
     error.clear();
     return true;
 }

@@ -257,6 +257,12 @@ class Config
     // DLSS Neural Rendering: a detail-synthesis pass over the upscaler's output. Off by default -- it is
     // an undocumented feature driven directly through its snippet, not something NVIDIA exposes.
     CustomOptional<bool> DlssNrEnabled { false };
+    // 0: NVIDIA NGX, 1: Intel SYCL through an OptiScaler-owned D3D12 list.
+    CustomOptional<uint32_t> DlssNrBackend { 0 };
+    // Native D3D12: dispatch on an OptiScaler-owned list immediately after the
+    // game's upscaler list is submitted. Requires a verified list boundary.
+    CustomOptional<bool> DlssNrNativeAfterSubmit { false };
+    CustomOptional<int32_t, NoDefault> DlssNrNativeOutputState;
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.
     CustomOptional<int> DlssNrToggleKey { UnboundKey };
