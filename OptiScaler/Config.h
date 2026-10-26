@@ -259,6 +259,9 @@ class Config
     CustomOptional<bool> DlssNrEnabled { false };
     // 0: NVIDIA NGX, 1: Intel SYCL through an OptiScaler-owned D3D12 list.
     CustomOptional<uint32_t> DlssNrBackend { 0 };
+    // D3D11 Present: estimate backward motion from consecutive final frames on
+    // the GPU and use confidence-gated temporal history.
+    CustomOptional<bool> DlssNrEstimateMotion { false };
     // Native D3D12: dispatch on an OptiScaler-owned list immediately after the
     // game's upscaler list is submitted. Requires a verified list boundary.
     CustomOptional<bool> DlssNrNativeAfterSubmit { false };

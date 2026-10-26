@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-#define ARC_NR_SYCL_API_VERSION 3u
+#define ARC_NR_SYCL_API_VERSION 5u
 #define ARC_NR_SYCL_GET_API_NAME "arc_nr_sycl_get_api"
 
 typedef enum ArcNrSyclStatus {
@@ -40,6 +40,8 @@ typedef struct ArcNrSyclFrame {
     uint32_t struct_size;
     uint32_t frame_index;
     uint32_t reset_history;
+    // Bit 0: GPU-estimate motion from consecutive color frames when no
+    // caller motion texture is available. Other bits are reserved.
     uint32_t reserved;
     // Exactly width*height*4 FP16 values, tightly packed RGBA. Colour is
     // normalized before model feature construction. Output is normalized
@@ -72,6 +74,7 @@ typedef struct ArcNrSyclGpuTimings {
     uint64_t output_us;
     uint64_t release_us;
     uint64_t total_us;
+    uint32_t temporal_active;
 } ArcNrSyclGpuTimings;
 
 typedef struct ArcNrSyclGpuFrame {
@@ -81,9 +84,28 @@ typedef struct ArcNrSyclGpuFrame {
     void* output_heap_nt_handle;
     uint64_t heap_bytes;
     uint32_t row_pitch_bytes;
-    uint32_t reserved;
+    // 0: RGBA16F, 1: RGBA8 UNORM, 2: BGRA8 UNORM,
+    // 3: RGB10A2 UNORM. Packed formats allow native-resolution D3D11
+    // swapchain processing without CPU staging.
+    uint32_t pixel_format;
     // Optional caller-owned timing output. All values include GPU waits.
     ArcNrSyclGpuTimings* timings;
+    // Optional motion-vector texture copied into a second shared GPU heap.
+    // Format 1 is RG16F, format 2 is RG32F. The usable render subrect starts
+    // at motion_base_x/y and is sampled at the SNR output resolution. Scales
+    // convert stored vector components to motion-subrect pixel displacement.
+    void* motion_heap_nt_handle;
+    uint64_t motion_heap_bytes;
+    uint32_t motion_row_pitch_bytes;
+    uint32_t motion_width;
+    uint32_t motion_height;
+    uint32_t motion_base_x;
+    uint32_t motion_base_y;
+    uint32_t motion_subrect_width;
+    uint32_t motion_subrect_height;
+    uint32_t motion_format;
+    float motion_scale_x;
+    float motion_scale_y;
 } ArcNrSyclGpuFrame;
 
 typedef struct ArcNrSyclApi {

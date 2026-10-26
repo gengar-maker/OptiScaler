@@ -61,6 +61,8 @@ struct DlssNrFrameInfo
     // top of that counts it twice.
     float MvScaleX = 1.0f;
     float MvScaleY = 1.0f;
+    unsigned int MvBaseX = 0;
+    unsigned int MvBaseY = 0;
 
     // Throw away the model's history. Set it on a cut, a teleport, or the first frame of a feature.
     bool Reset = false;

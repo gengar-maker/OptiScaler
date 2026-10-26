@@ -1532,8 +1532,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return;
     }
 
-    if (g_nr.failed || cmdList == nullptr || colour == nullptr || depth == nullptr ||
-        motion == nullptr || output == nullptr)
+    if (g_nr.failed || cmdList == nullptr || colour == nullptr || output == nullptr ||
+        (!useSycl && (depth == nullptr || motion == nullptr)))
     {
         ReportSkipOnce(g_nr.failed ? "it already failed this session" : "a resource was missing");
         return;
@@ -1574,7 +1574,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // are at display resolution. Their sizes come from the resources rather than from the caller:
     // one less thing a call site can get wrong, and the model takes the difference as a subrect per
     // resource rather than needing anything resampled.
-    const D3D12_RESOURCE_DESC guideDesc = depth->GetDesc();
+    // The current SYCL provider consumes only the encoded colour. XeSS inputs
+    // may omit depth (Wukong does), so use the frame dimensions for diagnostics
+    // until the SYCL path actually imports the guides.
+    const D3D12_RESOURCE_DESC guideDesc = depth != nullptr ? depth->GetDesc() : desc;
     unsigned int guideWidth = (unsigned int) guideDesc.Width;
     unsigned int guideHeight = guideDesc.Height;
 
@@ -2259,12 +2262,30 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     int result = 0;
     if (useSycl)
     {
+        // XeSS permits depth-free input only with a high-resolution motion
+        // texture. In that case the active motion area is the display size,
+        // even though RenderSubrectWidth/Height describe the colour input.
+        const D3D12_RESOURCE_DESC motionDesc =
+            motion != nullptr ? motion->GetDesc() : D3D12_RESOURCE_DESC{};
+        const bool highResMotion = depth == nullptr && motion != nullptr &&
+            motionDesc.Width >= width && motionDesc.Height >= height;
+        ID3D12Resource* temporalMotion =
+            (depth != nullptr || highResMotion) ? motion : nullptr;
+        if (motion != nullptr && temporalMotion == nullptr)
+        {
+            static bool warnedMissingDepth = false;
+            if (!warnedMissingDepth)
+            {
+                warnedMissingDepth = true;
+                LOG_WARN("SYCL temporal history disabled: low-resolution motion needs depth for reprojection");
+            }
+        }
+        const UINT motionWidth = highResMotion ? width : guideWidth;
+        const UINT motionHeight = highResMotion ? height : guideHeight;
         ArcNrSyclFrame syclFrame {};
         syclFrame.struct_size = sizeof(syclFrame);
         syclFrame.frame_index = static_cast<uint32_t>(g_frames);
-        // The current provider accepts history and motion together. This bridge has no
-        // normalized motion texture yet, so each frame is an independent inference.
-        syclFrame.reset_history = 1;
+        syclFrame.reset_history = g_nr.reset || temporalMotion == nullptr;
         syclFrame.normalized_style = std::min(1.0f, cfg.DlssNrStyle.value_or_default() / 2.0f);
         syclFrame.local_tone = cfg.DlssNrLocalTone.value_or_default();
         syclFrame.local_structure = cfg.DlssNrLocalStructure.value_or_default();
@@ -2274,7 +2295,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         std::string syclError;
         if (sycl->bridge->Run(device, timingQueue, cmdList, sycl->allocator, modelInput,
                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, g_nr.output,
-                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS, *sycl->provider,
+                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS, temporalMotion,
+                              motionWidth, motionHeight, frame.MvBaseX,
+                              frame.MvBaseY,
+                              g_nr.guideMvScaleX,
+                              g_nr.guideMvScaleY, *sycl->provider,
                               syclFrame, *sycl->listRecording, syclError))
         {
             result = NVSDK_NGX_Result_Success;
@@ -2623,9 +2648,11 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     ID3D12Resource* depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
     ID3D12Resource* motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
 
-    // Without all three there is nothing to run on. This is not a failure -- some evaluates legitimately
-    // carry none of it -- so it stays quiet and tries again next frame.
-    if (target == nullptr || depth == nullptr || motion == nullptr)
+    // The native SYCL bridge currently imports colour only. The NVIDIA path
+    // still needs both guides, but rejecting a XeSS frame without depth would
+    // prevent Wukong's valid SYCL colour path from ever reaching the provider.
+    const bool useSycl = Config::Instance()->DlssNrBackend.value_or_default() == 1;
+    if (target == nullptr || (!useSycl && (depth == nullptr || motion == nullptr)))
     {
         ReportSkipOnce(target == nullptr    ? "the parameters carried no output texture"
                        : depth == nullptr   ? "the parameters carried no depth"
@@ -2658,6 +2685,8 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     // How much of the guides is real. See DlssNrFrameInfo -- zero means the game did not say.
     params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &frame.RenderSubrectWidth);
     params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &frame.RenderSubrectHeight);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X, &frame.MvBaseX);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, &frame.MvBaseY);
 
     if (params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &frame.MvScaleX) != NVSDK_NGX_Result_Success)
         frame.MvScaleX = 1.0f;
@@ -2842,6 +2871,12 @@ void ProcessNativeSubmission(ID3D12CommandQueue* queue, ID3D12CommandList* list)
     }
 
     std::lock_guard<std::mutex> runLock(g_nativeRunMutex);
+    // The overlay can disable NR after Evaluate registered this producer list
+    // but before the game submits it. The upscaler's list has already run;
+    // leave its output alone when the toggle is now off.
+    if (!Config::Instance()->DlssNrEnabled.value_or_default())
+        return;
+
     if (queue == nullptr || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT ||
         !Config::Instance()->DlssNrNativeOutputState.has_value())
     {

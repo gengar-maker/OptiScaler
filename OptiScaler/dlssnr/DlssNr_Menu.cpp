@@ -3,6 +3,7 @@
 
 #include "DlssNr.h"
 #include "DlssNr_ExposureScan.h"
+#include "sycl/ValheimNr_Dx11.h"
 
 
 #include <Config.h>
@@ -94,7 +95,14 @@ void RenderMenu(Config* config, float menuResScale)
         if (ImGui::Checkbox("Enable Neural Rendering", &enabled))
             config->DlssNrEnabled = enabled;
 
-        HelpMarker("Synthesises detail in the upscaler's output, before frame generation sees it."
+        if (config->DlssNrBackend.value_or_default() == 1)
+            HelpMarker("Runs the Intel SYCL neural renderer over the upscaler's output."
+                       "\n\nRequires arc_nr_sycl.dll and arc_nr_weights beside OptiScaler."
+                       "\nOn native D3D12, the pass runs after the upscaler's command list is submitted."
+                       "\nIn Valheim and Tekken 7 DirectX 11 mode it processes the finished frame at display resolution."
+                       "\nThe Present path can estimate motion from consecutive frames for temporal history.");
+        else
+            HelpMarker("Synthesises detail in the upscaler's output, before frame generation sees it."
                        "\n\nNeeds two similarly named files beside OptiScaler, one character apart:"
                        "\n  nvngx_dlssnr.dll       NVIDIA's model (~165 MB) -- you supply it"
                        "\n  nvngx.dll_dlssnr.dll   the forwarder (~13 KB) -- ships in this package"
@@ -103,6 +111,16 @@ void RenderMenu(Config* config, float menuResScale)
         // The toggle can be bound to a key, and nobody would think to look for it under Keybinds
         // unless told. Dimmed, because it is a note rather than a setting.
         ImGui::TextDisabled("Can be toggled with a key -- bind it under Keybinds, \"Neural Rendering\".");
+
+        if (config->DlssNrBackend.value_or_default() == 1 &&
+            ValheimNr_Dx11::IsSupportedGame()) {
+            bool estimateMotion = config->DlssNrEstimateMotion.value_or_default();
+            if (ImGui::Checkbox("Estimate motion for temporal NR", &estimateMotion))
+                config->DlssNrEstimateMotion = estimateMotion;
+            HelpMarker("Estimates motion from consecutive finished frames on the Intel GPU."
+                       "\nConfidence gating rejects mismatched history at moving edges."
+                       "\nThe first frame after switching uses no history.");
+        }
 
         bool applyModel = config->DlssNrApplyModel.value_or_default();
         if (ImGui::Checkbox("Apply the model", &applyModel))
@@ -117,6 +135,9 @@ void RenderMenu(Config* config, float menuResScale)
         // is never touched -- so asking only that one reports "waiting for the upscaler" over a pass
         // that is demonstrably running.
         const bool vulkan = DlssNr::IsRunningVk();
+        const bool presentNr = ValheimNr_Dx11::IsRunning();
+        const bool presentGame = config->DlssNrBackend.value_or_default() == 1 &&
+                                 ValheimNr_Dx11::IsSupportedGame();
 
         // Turning the pass off does not release the model, so the feature handle stays alive and
         // IsRunning keeps answering yes. Reporting a cost from that was wrong in the way that matters
@@ -126,9 +147,12 @@ void RenderMenu(Config* config, float menuResScale)
         {
             ImGui::TextDisabled("Off. The model stays loaded, so turning this back on is immediate.");
         }
-        else if (!DlssNr::IsRunning() && !vulkan)
+        else if (!DlssNr::IsRunning() && !vulkan && !presentNr)
         {
-            const char* reason = DlssNr::FailureReason();
+            const std::string presentReason = presentGame ?
+                ValheimNr_Dx11::FailureReason() : std::string{};
+            const char* reason = presentGame ? presentReason.c_str() :
+                DlssNr::FailureReason();
 
             if (reason[0] != 0)
             {
@@ -136,9 +160,14 @@ void RenderMenu(Config* config, float menuResScale)
                 ImGui::SameLine();
 
                 if (ImGui::SmallButton("Retry"))
-                    DlssNr::RetryAfterFailure();
+                {
+                    if (presentGame) ValheimNr_Dx11::RetryAfterFailure();
+                    else DlssNr::RetryAfterFailure();
+                }
             }
-            else if (enabled)
+            else if (presentGame)
+                ImGui::TextUnformatted("Waiting for a DirectX 11 frame.");
+            else
                 ImGui::TextUnformatted("Waiting for the upscaler to run.");
         }
         else
@@ -148,7 +177,9 @@ void RenderMenu(Config* config, float menuResScale)
             // nothing in it to hang this off.
             // Either backend's timer. They measure the same thing by different means, and only one
             // of them is running.
-            const auto ms = vulkan ? DlssNr::LastGpuTimeVk() : DlssNr::LastGpuTime();
+            const auto ms = presentNr ? ValheimNr_Dx11::LastFrameMs()
+                                           : (vulkan ? DlssNr::LastGpuTimeVk()
+                                                     : DlssNr::LastGpuTime());
 
             // With "Apply the model" off the pass STILL RUNS (so Hold-frame A/B can toggle its edit on
             // a frozen frame) -- it only outputs the clean frame. So the cost is real, and saying so

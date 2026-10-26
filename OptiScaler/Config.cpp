@@ -318,6 +318,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             // --- DLSS 5 Neural Rendering (OptiScaler/dlssnr) ---
             DlssNrEnabled.set_from_config(readBool("DlssNr", "Enabled"));
             DlssNrBackend.set_from_config(readUInt("DlssNr", "Backend"));
+            DlssNrEstimateMotion.set_from_config(readBool("DlssNr", "EstimateMotion"));
             DlssNrNativeAfterSubmit.set_from_config(readBool("DlssNr", "NativeAfterSubmit"));
             DlssNrNativeOutputState.set_from_config(readInt("DlssNr", "NativeOutputState"));
             DlssNrToggleKey.set_from_config(readInt("DlssNr", "ToggleKey"));
@@ -1202,6 +1203,7 @@ bool Config::SaveIni()
     // --- DLSS 5 Neural Rendering (OptiScaler/dlssnr) ---
     ini.SetValue("DlssNr", "Enabled", GetBoolValue(Instance()->DlssNrEnabled.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Backend", GetIntValue(Instance()->DlssNrBackend.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "EstimateMotion", GetBoolValue(Instance()->DlssNrEstimateMotion.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeAfterSubmit", GetBoolValue(Instance()->DlssNrNativeAfterSubmit.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeOutputState", GetIntValue(Instance()->DlssNrNativeOutputState.value_for_config()).c_str());
     {

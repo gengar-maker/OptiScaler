@@ -20,7 +20,9 @@ public:
     bool Create(const ArcNrSyclCreate& create, std::string& error);
     ArcNrSyclStatus Evaluate(const ArcNrSyclFrame& frame, std::string& error);
     ArcNrSyclStatus EvaluateGpu(const ArcNrSyclGpuFrame& frame, std::string& error);
+    void ResetSession();
     void Reset();
+    bool Loaded() const { return module_ != nullptr; }
     bool Ready() const { return module_ != nullptr && session_ != nullptr; }
 
 private:

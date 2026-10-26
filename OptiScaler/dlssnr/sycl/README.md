@@ -4,9 +4,11 @@ This directory contains an *OptiScaler-owned* Intel SYCL model provider. It
 does not reuse the NVIDIA NGX forwarder ABI. `ArcNrSyclApi.h` is the versioned
 interface to `arc_nr_sycl.dll`; `ArcNrSyclProvider.cpp` builds that module
 with Intel oneAPI and the reconstructed SNR model; `ArcNrSyclLoader.cpp` is
-compiled into OptiScaler and loads/checks the module ABI. ABI v3 retains
-host buffers for standalone tests, adds D3D12 shared GPU heap handles, and
-optionally returns stage timings for GPU frames.
+compiled into OptiScaler and loads/checks the module ABI. ABI v5 retains
+host buffers for standalone tests and D3D12 shared GPU heap handles, and
+adds a second shared heap for RG16F/RG32F motion vectors. ABI v5 also accepts
+RGBA8/BGRA8 swapchain bytes for the Valheim path; the SYCL GPU converts them
+to and from the model's RGBA16F tensors.
 The game path copies between tiled textures and row-major shared buffers on
 the D3D12 queue. SYCL imports those buffers as device memory; no frame pixels
 pass through host memory.
@@ -47,10 +49,59 @@ The D3D11-to-D3D12 upscaler bridge now calls the owned-list primitive when
 `[DlssNr] Backend=1`. Put `arc_nr_sycl.dll` and the `arc_nr_weights` directory
 (with `logical` and `derived` children) beside OptiScaler. The full Windows
 OptiScaler solution builds with this integration. The provider has passed a
-standalone GPU frame test, but the D3D11 in-game path has not been exercised.
-The first integration uses independent frames; temporal history and motion
-conversion are still needed before claiming equivalent NR output. Failures
-are logged and do not silently fall back to NVIDIA.
+standalone GPU frame test, but the D3D11 upscaler bridge path has not been exercised.
+
+Valheim and Tekken 7 have no intercepted temporal upscaler call. In DirectX 11 mode,
+`ValheimNr_Dx11` runs before swapchain Present when `[DlssNr] Enabled=true`
+and `Backend=1`. It copies the finished RGBA8, BGRA8, RGB10A2 or RGBA16F
+frame into a shared D3D11
+texture, uses D3D11/D3D12 fences and the owned-list bridge to run the SYCL
+model, and copies the answer back to the game backbuffer. Frame pixels do not
+pass through CPU memory. The pass runs at the game's display resolution.
+With `[DlssNr] EstimateMotion=true`, the provider estimates backward motion
+from consecutive pre-NR frames on the GPU and uses confidence-gated temporal
+history. This is optical flow, not the engine's velocity texture: the Present
+boundary does not expose that texture. The first frame after enabling the pass,
+switching the option, or changing resolution starts a new history. The menu
+has an "Estimate motion for temporal NR" checkbox for A/B testing.
+The game's HUD is part of the processed image; OptiScaler's own overlay is
+drawn afterward. Other formats and Vulkan are not supported by this hook.
+The RGB10A2 path packs and unpacks pixels in SYCL GPU kernels, with no CPU
+pixel staging.
+For Tekken 7, the hook matches `TekkenGame-Win64-Shipping.exe`; the game's
+launcher is not the render process. Use an offline mode for visual A/B testing.
+Tekken 7's observed backbuffer was RGB10A2 at 1920x1080. On Arc Pro B70,
+the experimental MegaWindow32 build ran through the whole Present path at
+about 102 ms per warmed frame, including about 91 ms of model execution.
+At 1280x720 a standalone RGB10A2 provider test measured 41.8 ms with
+MegaWindow32 and 38.4 ms without it; this fused prototype is slower on
+that input and remains experimental.
+Tekken's live 1280x720 Present path measured about 45 ms per warmed frame,
+with about 40 ms in the provider. A resolution change recreates the model
+session while keeping the provider DLL and its selected Level Zero device
+loaded; the live 1920x1080 to 1280x720 transition completed successfully.
+The menu reports Present-path errors directly and provides Retry.
+On the Arc Pro B70 1280x720 GPU smoke test, estimated motion added about
+0.8-1.0 ms per warmed frame over supplied zero vectors. A static input gave
+bit-identical output to supplied zero vectors. With a 4-pixel synthetic
+shift, estimated and supplied-vector outputs differed by 0.00074 mean
+absolute RGB (normalized 0-1), with no sample over 0.05 in the tested
+interior. This does not replace a moving-scene visual check in Tekken.
+On Arc Pro B70 the live 960x540 Valheim menu path ran without SYCL errors;
+29 warmed samples had a median of 33.52 ms for the whole pass and 25.4 ms
+for model execution. Scene quality and gameplay still need visual checking.
+The provider now retains its previous output on device and uses motion
+vectors to reproject it when the next frame index is consecutive and the
+game did not request a reset. The bridge copies the motion texture on the
+producer list, waits for the same D3D12 fence as color, and normalizes the
+vectors on the SYCL GPU. Missing or unsupported motion falls back to an
+independent frame. The Wukong game path still needs a moving-scene check;
+low-resolution motion currently uses bilinear upsampling without the
+depth-guided dilation used by XeSS. Failures are logged and do not silently
+fall back to NVIDIA.
+The first valid motion texture is logged with format, dimensions and scales;
+`NR-PROFILE ... temporal=1 motion=1` confirms that a warmed RG16F frame used
+history. A reset or a discontinuous frame index must report `temporal=0`.
 
 Native D3D12 games supply a game-owned open list. OptiScaler cannot close or
 reset that list. An opt-in `NativeAfterSubmit` path records the upscaler's

@@ -34,10 +34,15 @@ public:
              D3D12_RESOURCE_STATES color_state,
              ID3D12Resource* model_output,
              D3D12_RESOURCE_STATES output_state,
+             ID3D12Resource* motion,
+             UINT motion_subrect_width, UINT motion_subrect_height,
+             UINT motion_base_x, UINT motion_base_y,
+             float motion_scale_x, float motion_scale_y,
              ArcNrSyclLoader& provider,
              ArcNrSyclFrame frame,
              bool& list_recording,
-             std::string& error);
+             std::string& error,
+             bool provider_estimated_motion = false);
     bool Flush(ID3D12Device* device, ID3D12CommandQueue* queue, std::string& error)
     {
         return WaitForQueue(device, queue, error);

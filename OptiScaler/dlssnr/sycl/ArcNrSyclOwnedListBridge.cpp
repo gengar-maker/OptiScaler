@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <climits>
+#include <cmath>
 
 namespace {
 
@@ -47,14 +49,35 @@ D3D12_HEAP_PROPERTIES Heap(D3D12_HEAP_TYPE type) {
     return properties;
 }
 
-bool IsRgba16Texture(ID3D12Resource* resource, UINT width, UINT height) {
-    if (resource == nullptr) return false;
+UINT ColorFormat(ID3D12Resource* resource, UINT width, UINT height) {
+    if (resource == nullptr) return UINT_MAX;
     const D3D12_RESOURCE_DESC desc = resource->GetDesc();
-    return desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
-           desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT &&
-           desc.Width == width && desc.Height == height &&
-           desc.DepthOrArraySize == 1 && desc.SampleDesc.Count == 1 &&
-           desc.MipLevels == 1;
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        desc.Width != width || desc.Height != height ||
+        desc.DepthOrArraySize != 1 || desc.SampleDesc.Count != 1 ||
+        desc.MipLevels != 1) return UINT_MAX;
+    switch (desc.Format) {
+    case DXGI_FORMAT_R16G16B16A16_FLOAT: return 0;
+    case DXGI_FORMAT_R10G10B10A2_UNORM: return 3;
+    case DXGI_FORMAT_R8G8B8A8_UNORM: return 1;
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return 1;
+    case DXGI_FORMAT_B8G8R8A8_UNORM: return 2;
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return 2;
+    default: return UINT_MAX;
+    }
+}
+
+UINT MotionFormat(DXGI_FORMAT format) {
+    switch (format) {
+    case DXGI_FORMAT_R16G16_FLOAT:
+    case DXGI_FORMAT_R16G16_TYPELESS:
+        return 1;
+    case DXGI_FORMAT_R32G32_FLOAT:
+    case DXGI_FORMAT_R32G32_TYPELESS:
+        return 2;
+    default:
+        return 0;
+    }
 }
 
 std::string HResult(const char* operation, HRESULT result) {
@@ -119,9 +142,14 @@ bool ArcNrSyclOwnedListBridge::Run(
     ID3D12CommandAllocator* owned_allocator,
     ID3D12Resource* model_color, D3D12_RESOURCE_STATES color_state,
     ID3D12Resource* model_output, D3D12_RESOURCE_STATES output_state,
+    ID3D12Resource* motion,
+    UINT motion_subrect_width, UINT motion_subrect_height,
+    UINT motion_base_x, UINT motion_base_y,
+    float motion_scale_x, float motion_scale_y,
     ArcNrSyclLoader& provider, ArcNrSyclFrame frame,
     bool& list_recording,
-    std::string& error) {
+    std::string& error,
+    bool provider_estimated_motion) {
     list_recording = true;
     if (!device || !queue || !owned_list || !owned_allocator ||
         !provider.Ready() || frame.struct_size != sizeof(frame)) {
@@ -131,10 +159,11 @@ bool ArcNrSyclOwnedListBridge::Run(
     const auto color_desc = model_color ? model_color->GetDesc() : D3D12_RESOURCE_DESC{};
     const UINT width = static_cast<UINT>(color_desc.Width);
     const UINT height = color_desc.Height;
+    const UINT color_format = ColorFormat(model_color, width, height);
     if (width == 0 || height == 0 || width > 8192 || height > 8192 ||
-        !IsRgba16Texture(model_color, width, height) ||
-        !IsRgba16Texture(model_output, width, height)) {
-        error = "SYCL shared GPU path needs matching single-sample RGBA16F textures";
+        color_format == UINT_MAX ||
+        ColorFormat(model_output, width, height) != color_format) {
+        error = "SYCL shared GPU path needs matching single-sample RGBA16F/RGBA8/BGRA8/RGB10A2 textures";
         return false;
     }
     if (queue->GetDesc().Type != owned_list->GetType() ||
@@ -143,14 +172,51 @@ bool ArcNrSyclOwnedListBridge::Run(
         return false;
     }
 
+    const D3D12_RESOURCE_DESC motion_desc =
+        motion ? motion->GetDesc() : D3D12_RESOURCE_DESC{};
+    const UINT motion_format = MotionFormat(motion_desc.Format);
+    const bool motion_usable = motion != nullptr && motion_format != 0 &&
+        motion_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+        motion_desc.DepthOrArraySize == 1 && motion_desc.MipLevels == 1 &&
+        motion_desc.SampleDesc.Count == 1 &&
+        motion_desc.Width <= 8192 && motion_desc.Height != 0 &&
+        motion_desc.Height <= 8192 &&
+        motion_base_x < motion_desc.Width && motion_base_y < motion_desc.Height &&
+        motion_subrect_width != 0 && motion_subrect_height != 0 &&
+        std::isfinite(motion_scale_x) && std::isfinite(motion_scale_y);
+    if (!motion_usable) {
+        if (!provider_estimated_motion)
+            frame.reset_history = 1;
+        if (motion != nullptr) {
+            static std::atomic<bool> warned {false};
+            if (!warned.exchange(true))
+                LOG_WARN("SYCL temporal history disabled: unsupported motion texture format {} or dimensions {}x{}",
+                         static_cast<int>(motion_desc.Format), motion_desc.Width, motion_desc.Height);
+        }
+    }
+    motion_subrect_width = motion_usable ? std::min<UINT>(
+        motion_subrect_width, static_cast<UINT>(motion_desc.Width) - motion_base_x) : 0;
+    motion_subrect_height = motion_usable ? std::min<UINT>(
+        motion_subrect_height, motion_desc.Height - motion_base_y) : 0;
+    if (motion_usable) {
+        static std::atomic<bool> reported {false};
+        if (!reported.exchange(true))
+            LOG_INFO("SYCL motion input: DXGI format {}, texture {}x{}, active {}x{} at {},{}, scales {}x{}",
+                     static_cast<int>(motion_desc.Format), motion_desc.Width,
+                     motion_desc.Height, motion_subrect_width,
+                     motion_subrect_height, motion_base_x, motion_base_y,
+                     motion_scale_x, motion_scale_y);
+    }
+
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
     UINT rows = 0;
     UINT64 row_bytes = 0, total_bytes = 0;
     device->GetCopyableFootprints(&color_desc, 0, 1, 0, &footprint,
                                   &rows, &row_bytes, &total_bytes);
-    if (rows != height || row_bytes != static_cast<UINT64>(width) * 8 ||
+    const UINT bytes_per_pixel = color_format == 0 ? 8 : 4;
+    if (rows != height || row_bytes != static_cast<UINT64>(width) * bytes_per_pixel ||
         total_bytes == 0) {
-        error = "unexpected RGBA16F copy footprint";
+        error = "unexpected color copy footprint";
         return false;
     }
     const auto buffer_desc = BufferDesc(total_bytes);
@@ -158,6 +224,31 @@ bool ArcNrSyclOwnedListBridge::Run(
     if (allocation.SizeInBytes == UINT64_MAX) {
         error = "invalid shared GPU buffer allocation";
         return false;
+    }
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT motion_footprint {};
+    UINT motion_rows = 0;
+    UINT64 motion_row_bytes = 0, motion_total_bytes = 0;
+    D3D12_RESOURCE_DESC motion_buffer_desc {};
+    D3D12_RESOURCE_ALLOCATION_INFO motion_allocation {};
+    if (motion_usable) {
+        device->GetCopyableFootprints(&motion_desc, 0, 1, 0, &motion_footprint,
+                                      &motion_rows, &motion_row_bytes,
+                                      &motion_total_bytes);
+        const UINT bytes_per_pixel = motion_format == 1 ? 4 : 8;
+        if (motion_rows != motion_desc.Height ||
+            motion_row_bytes != motion_desc.Width *
+                static_cast<UINT64>(bytes_per_pixel) ||
+            motion_total_bytes == 0) {
+            error = "unexpected motion copy footprint";
+            return false;
+        }
+        motion_buffer_desc = BufferDesc(motion_total_bytes);
+        motion_allocation = device->GetResourceAllocationInfo(
+            0, 1, &motion_buffer_desc);
+        if (motion_allocation.SizeInBytes == UINT64_MAX) {
+            error = "invalid shared motion buffer allocation";
+            return false;
+        }
     }
     using Clock = std::chrono::steady_clock;
     const auto profile_start = Clock::now();
@@ -171,8 +262,8 @@ bool ArcNrSyclOwnedListBridge::Run(
     heap_desc.Properties = Heap(D3D12_HEAP_TYPE_DEFAULT);
     heap_desc.Flags = D3D12_HEAP_FLAG_SHARED |
                       D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER;
-    ComPtr<ID3D12Heap> color_heap, output_heap;
-    ComPtr<ID3D12Resource> color_buffer, output_buffer;
+    ComPtr<ID3D12Heap> color_heap, output_heap, motion_heap;
+    ComPtr<ID3D12Resource> color_buffer, output_buffer, motion_buffer;
     HRESULT result = device->CreateHeap(&heap_desc, IID_PPV_ARGS(&color_heap));
     if (FAILED(result)) {
         error = HResult("shared color heap allocation", result);
@@ -197,10 +288,26 @@ bool ArcNrSyclOwnedListBridge::Run(
         error = HResult("shared output buffer allocation", result);
         return false;
     }
+    if (motion_usable) {
+        D3D12_HEAP_DESC motion_heap_desc = heap_desc;
+        motion_heap_desc.SizeInBytes = motion_allocation.SizeInBytes;
+        motion_heap_desc.Alignment = motion_allocation.Alignment;
+        result = device->CreateHeap(&motion_heap_desc,
+                                    IID_PPV_ARGS(&motion_heap));
+        if (SUCCEEDED(result))
+            result = device->CreatePlacedResource(
+                motion_heap.Get(), 0, &motion_buffer_desc,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                IID_PPV_ARGS(&motion_buffer));
+        if (FAILED(result)) {
+            error = HResult("shared motion buffer allocation", result);
+            return false;
+        }
+    }
     struct SharedHandle {
         HANDLE value = nullptr;
         ~SharedHandle() { if (value != nullptr) CloseHandle(value); }
-    } color_handle, output_handle;
+    } color_handle, output_handle, motion_handle;
     result = device->CreateSharedHandle(color_heap.Get(), nullptr, GENERIC_ALL,
                                         nullptr, &color_handle.value);
     if (FAILED(result)) {
@@ -212,6 +319,15 @@ bool ArcNrSyclOwnedListBridge::Run(
     if (FAILED(result)) {
         error = HResult("shared output handle", result);
         return false;
+    }
+    if (motion_usable) {
+        result = device->CreateSharedHandle(motion_heap.Get(), nullptr,
+                                            GENERIC_ALL, nullptr,
+                                            &motion_handle.value);
+        if (FAILED(result)) {
+            error = HResult("shared motion handle", result);
+            return false;
+        }
     }
     const auto allocated = Clock::now();
 
@@ -228,6 +344,23 @@ bool ArcNrSyclOwnedListBridge::Run(
     owned_list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
     Transition(owned_list, model_color, D3D12_RESOURCE_STATE_COPY_SOURCE,
                color_state);
+    if (motion_usable) {
+        D3D12_TEXTURE_COPY_LOCATION motion_source {};
+        motion_source.pResource = motion;
+        motion_source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        motion_source.SubresourceIndex = 0;
+        D3D12_TEXTURE_COPY_LOCATION motion_dest {};
+        motion_dest.pResource = motion_buffer.Get();
+        motion_dest.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        motion_dest.PlacedFootprint = motion_footprint;
+        Transition(owned_list, motion,
+                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                   D3D12_RESOURCE_STATE_COPY_SOURCE);
+        owned_list->CopyTextureRegion(&motion_dest, 0, 0, 0,
+                                      &motion_source, nullptr);
+        Transition(owned_list, motion, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
     result = owned_list->Close();
     if (FAILED(result)) {
         // Close failure leaves the list's state unusable for normal recording.
@@ -265,6 +398,21 @@ bool ArcNrSyclOwnedListBridge::Run(
     gpu_frame.output_heap_nt_handle = output_handle.value;
     gpu_frame.heap_bytes = allocation.SizeInBytes;
     gpu_frame.row_pitch_bytes = footprint.Footprint.RowPitch;
+    gpu_frame.pixel_format = color_format;
+    if (motion_usable) {
+        gpu_frame.motion_heap_nt_handle = motion_handle.value;
+        gpu_frame.motion_heap_bytes = motion_allocation.SizeInBytes;
+        gpu_frame.motion_row_pitch_bytes = motion_footprint.Footprint.RowPitch;
+        gpu_frame.motion_width = static_cast<UINT>(motion_desc.Width);
+        gpu_frame.motion_height = motion_desc.Height;
+        gpu_frame.motion_base_x = motion_base_x;
+        gpu_frame.motion_base_y = motion_base_y;
+        gpu_frame.motion_subrect_width = motion_subrect_width;
+        gpu_frame.motion_subrect_height = motion_subrect_height;
+        gpu_frame.motion_format = motion_format;
+        gpu_frame.motion_scale_x = motion_scale_x;
+        gpu_frame.motion_scale_y = motion_scale_y;
+    }
     ArcNrSyclGpuTimings sycl_timings {};
     gpu_frame.timings = &sycl_timings;
     if (provider.EvaluateGpu(gpu_frame, error) != ARC_NR_SYCL_OK)
@@ -316,8 +464,9 @@ bool ArcNrSyclOwnedListBridge::Run(
     static std::atomic<unsigned int> profile_frame {0};
     const unsigned int frame_number = profile_frame.fetch_add(1);
     if (frame_number == 0 || frame_number % 30 == 0) {
-        LOG_INFO("NR-PROFILE frame={} {}x{} alloc={:.2f}ms producer={:.2f}ms provider={:.2f}ms output={:.2f}ms; SYCL import={:.2f} input={:.2f} prepare={:.2f} model={:.2f} compose={:.2f} export={:.2f} release={:.2f} total={:.2f}ms",
-                 frame_number, width, height,
+        LOG_INFO("NR-PROFILE frame={} {}x{} temporal={} motion={} alloc={:.2f}ms producer={:.2f}ms provider={:.2f}ms output={:.2f}ms; SYCL import={:.2f} input={:.2f} prepare={:.2f} model={:.2f} compose={:.2f} export={:.2f} release={:.2f} total={:.2f}ms",
+                 frame_number, width, height, sycl_timings.temporal_active,
+                 motion_format,
                  milliseconds(profile_start, allocated),
                  milliseconds(allocated, producer_ready),
                  milliseconds(producer_ready, provider_ready),

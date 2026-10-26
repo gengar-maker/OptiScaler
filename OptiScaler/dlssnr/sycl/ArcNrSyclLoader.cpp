@@ -46,10 +46,7 @@ bool ArcNrSyclLoader::Create(const ArcNrSyclCreate& create,
         error = "SYCL provider is not loaded";
         return false;
     }
-    if (session_ != nullptr) {
-        api_.destroy(session_);
-        session_ = nullptr;
-    }
+    ResetSession();
     std::array<char, 512> diagnostic {};
     session_ = api_.create(&create, diagnostic.data(),
                            static_cast<uint32_t>(diagnostic.size()));
@@ -85,10 +82,14 @@ ArcNrSyclStatus ArcNrSyclLoader::EvaluateGpu(const ArcNrSyclGpuFrame& frame,
     return status;
 }
 
-void ArcNrSyclLoader::Reset() {
+void ArcNrSyclLoader::ResetSession() {
     if (session_ != nullptr && api_.destroy != nullptr)
         api_.destroy(session_);
     session_ = nullptr;
+}
+
+void ArcNrSyclLoader::Reset() {
+    ResetSession();
     if (module_ != nullptr)
         FreeLibrary(static_cast<HMODULE>(module_));
     module_ = nullptr;

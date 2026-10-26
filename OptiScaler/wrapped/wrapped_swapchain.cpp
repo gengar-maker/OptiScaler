@@ -16,6 +16,7 @@
 #include <d3d12.h>
 #include <misc/IdentifyGpu.h>
 #include <hooks/Xell_Hooks.h>
+#include <dlssnr/sycl/ValheimNr_Dx11.h>
 
 #ifdef LOW_LATENCY_INPUTS
 #include <low_latency/input/input_antilag2.h>
@@ -361,6 +362,11 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         // Tick feature to let it know if it's frozen
         if (auto currentFeature = State::Instance().currentFeature; currentFeature != nullptr)
             currentFeature->TickFrozenCheck();
+
+        // Valheim renders without an intercepted upscaler call. Process the
+        // game's finished D3D11 frame before OptiScaler draws its overlay.
+        if (isD3D11)
+            ValheimNr_Dx11::BeforePresent(pSwapChain, device);
 
         // Draw overlay
         MenuOverlayDx::Present(pSwapChain, SyncInterval, Flags, pPresentParameters, pDevice, hWnd, isUWP);
