@@ -7,6 +7,8 @@ if(NOT EXISTS "${SNR_RUNTIME_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "Set SNR_RUNTIME_DIR to the SNR/runtime source directory")
 endif()
 
+option(ARC_NR_DISABLE_E4M3
+       "Keep SNR runtime activations in FP16 without E4M3 publication" ON)
 add_subdirectory("${SNR_RUNTIME_DIR}" "${CMAKE_BINARY_DIR}/snr-runtime")
 set_target_properties(arc_nr_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
 option(ARC_NR_SYCL_FAST_DEFAULT

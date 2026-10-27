@@ -40,6 +40,12 @@ network shape, complete QK/PV attention and normalization, and all temporal
 inputs. It does not turn on the approximate `ARC_NR_SYCL_FAST_DEFAULT` profile;
 the two CMake options are mutually exclusive. Set `SNR_FUSED_DENSE_FFN=0`
 and `SNR_FUSED_BRANCHED_FFN=0` to compare with the unfused reference path.
+The provider defaults to `ARC_NR_DISABLE_E4M3=ON`: tensors remain FP16 at
+publication boundaries instead of being rounded to E4M3 values held in FP16.
+All learned layers and temporal inputs still run. Set
+`-DARC_NR_DISABLE_E4M3=OFF` for the original numerical model. The FP16 mode
+changes image values and must be checked on the target game; it does not
+turn the model into a native FP8 or INT8 implementation.
 For a reproducible Windows provider build and non-black frame test, follow
 [windows/README.md](windows/README.md). That test does not verify a game's
 native D3D12 command-list boundary.
