@@ -46,6 +46,11 @@ All learned layers and temporal inputs still run. Set
 `-DARC_NR_DISABLE_E4M3=OFF` for the original numerical model. The FP16 mode
 changes image values and must be checked on the target game; it does not
 turn the model into a native FP8 or INT8 implementation.
+To combine the measured fast profile with FP16, configure
+`-DARC_NR_SYCL_FAST_DEFAULT=ON -DARC_NR_SYCL_EXACT_FUSED_FFN_DEFAULT=OFF
+-DARC_NR_DISABLE_E4M3=ON`. The fast profile already enables both fused FFNs;
+it also uses approximate window normalization, bias-only QK for the first
+full-resolution window, and 720-pixel network alignment at 1280x720.
 For a reproducible Windows provider build and non-black frame test, follow
 [windows/README.md](windows/README.md). That test does not verify a game's
 native D3D12 command-list boundary.
