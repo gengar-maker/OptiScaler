@@ -557,11 +557,17 @@ ArcNrSyclStatus EvaluateGpu(void* opaque, const ArcNrSyclGpuFrame* input,
         session.model.Execute(session.features.data(), session.head.data());
         queue.wait_and_throw();
         modeled = Clock::now();
+        const bool have_strengths = (input->controls.reserved & 2u) != 0;
+        const float colour_strength = have_strengths
+            ? ((input->controls.reserved >> 8) & 0xfffu) / 1024.0f : 1.0f;
+        const float transfer_strength = have_strengths
+            ? ((input->controls.reserved >> 20) & 0xfffu) / 1024.0f : 1.0f;
         session.frame.Compose(session.color.data(), session.head.data(),
                               session.features.data(), nullptr, temporal,
                               controls, session.output.data(),
                               temporal && estimated_motion ?
-                                  session.motion_confidence.data() : nullptr)
+                                  session.motion_confidence.data() : nullptr,
+                              colour_strength, transfer_strength)
             .wait_and_throw();
         composed = Clock::now();
         const auto* output = session.output.data();

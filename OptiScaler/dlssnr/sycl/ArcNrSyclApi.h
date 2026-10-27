@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-#define ARC_NR_SYCL_API_VERSION 5u
+#define ARC_NR_SYCL_API_VERSION 6u
 #define ARC_NR_SYCL_GET_API_NAME "arc_nr_sycl_get_api"
 
 typedef enum ArcNrSyclStatus {
@@ -41,11 +41,13 @@ typedef struct ArcNrSyclFrame {
     uint32_t frame_index;
     uint32_t reset_history;
     // Bit 0: GPU-estimate motion from consecutive color frames when no
-    // caller motion texture is available. Other bits are reserved.
+    // caller motion texture is available. Bit 1: apply colour and transfer
+    // strengths packed as unsigned Q10 values in bits 8..19 and 20..31.
+    // An unset bit 1 keeps both strengths at 1 for older callers.
     uint32_t reserved;
     // Exactly width*height*4 FP16 values, tightly packed RGBA. Colour is
     // normalized before model feature construction. Output is normalized
-    // RGB with alpha 1. The caller owns both buffers until Evaluate returns.
+    // RGB with input alpha preserved. The caller owns both buffers until Evaluate returns.
     const uint16_t* color_rgba_f16;
     uint16_t* output_rgba_f16;
     // Optional temporal inputs. Either both are null, or both are present.

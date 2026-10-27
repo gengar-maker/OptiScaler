@@ -139,13 +139,15 @@ void RenderMenu(Config* config, float menuResScale)
         const bool presentGame = config->DlssNrBackend.value_or_default() == 1 &&
                                  ValheimNr_Dx11::IsSupportedGame();
 
-        // Turning the pass off does not release the model, so the feature handle stays alive and
-        // IsRunning keeps answering yes. Reporting a cost from that was wrong in the way that matters
-        // most: the toggle is how anyone A/Bs this, so the one moment the number is read is the one
-        // moment it describes the frame before last.
+        // The D3D11 Present path releases its model session when disabled, so
+        // a stage load gets the GPU memory back. Other backends retain their
+        // own lifetime policy.
         if (!enabled)
         {
-            ImGui::TextDisabled("Off. The model stays loaded, so turning this back on is immediate.");
+            if (presentGame)
+                ImGui::TextDisabled("Off. The D3D11 model session is released; turning it back on reloads it.");
+            else
+                ImGui::TextDisabled("Off. The model stays loaded, so turning this back on is immediate.");
         }
         else if (!DlssNr::IsRunning() && !vulkan && !presentNr)
         {

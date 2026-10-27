@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <mutex>
 #include <string>
@@ -207,7 +208,16 @@ struct Session {
         frame.struct_size = sizeof(frame);
         frame.frame_index = frame_index++;
         frame.reset_history = !estimate_motion || history_invalid;
-        frame.reserved = estimate_motion ? 1u : 0u;
+        const auto strength_q10 = [](float value) -> uint32_t {
+            return static_cast<uint32_t>(std::lround(
+                std::clamp(value, 0.0f, 4095.0f / 1024.0f) * 1024.0f));
+        };
+        const uint32_t colour_strength = strength_q10(
+            cfg->DlssNrColourStrength.value_or_default());
+        const uint32_t transfer_strength = strength_q10(
+            cfg->DlssNrTransferStrength.value_or_default());
+        frame.reserved = (estimate_motion ? 1u : 0u) | 2u |
+                         (colour_strength << 8) | (transfer_strength << 20);
         frame.normalized_style =
             std::min(1.0f, cfg->DlssNrStyle.value_or_default() / 2.0f);
         frame.local_tone = cfg->DlssNrLocalTone.value_or_default();
@@ -263,7 +273,13 @@ void BeforePresent(IDXGISwapChain* swapchain, ID3D11Device* device) {
     std::lock_guard<std::mutex> lock(g_session_mutex);
     if (!Config::Instance()->DlssNrEnabled.value_or_default() ||
         Config::Instance()->DlssNrBackend.value_or_default() != 1) {
-        g_session.history_invalid = true;
+        // A disabled pass must give its GPU allocations back to the game.
+        // Otherwise a stage load can still compete with the resident model,
+        // despite no neural frame being submitted.
+        if (g_session.device11) {
+            g_session.Release();
+            LOG_INFO("D3D11 Present SYCL NR disabled: released model session and shared textures");
+        }
         g_session.failed = false;
         g_failure_reason.clear();
         g_running = false;
