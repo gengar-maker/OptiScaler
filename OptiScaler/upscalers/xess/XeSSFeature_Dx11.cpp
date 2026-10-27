@@ -1,5 +1,6 @@
 #include <pch.h>
 #include "XeSSFeature_Dx11.h"
+#include <dlssnr/sycl/ValheimNr_Dx11.h>
 #include <imgui/ImGuiNotify.hpp>
 
 static std::string ResultToString(xess_result_t result)
@@ -428,6 +429,47 @@ bool XeSSFeature_Dx11::EvaluateInternal(ID3D11DeviceContext* DeviceContext, NVSD
                       &params.inputResponsiveMaskBase.x);
     InParameters->Get(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_SubrectBase_Y,
                       &params.inputResponsiveMaskBase.y);
+
+    // An upscaler call supplies the pre-TAA color and real motion vectors.
+    // Run SNR at that input resolution, then give its separate GPU texture
+    // to XeSS. The game-owned color and velocity resources are untouched.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> nrColor;
+    if (Config::Instance()->DlssNrBackend.value_or_default() == 1)
+    {
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> colorTexture;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> motionTexture;
+        const HRESULT colorResult = paramColor->QueryInterface(IID_PPV_ARGS(&colorTexture));
+        const HRESULT motionResult = paramVelocity->QueryInterface(IID_PPV_ARGS(&motionTexture));
+        if (SUCCEEDED(colorResult) && SUCCEEDED(motionResult))
+        {
+            D3D11_TEXTURE2D_DESC motionDesc {};
+            motionTexture->GetDesc(&motionDesc);
+            std::string nrError;
+            const UINT mvBaseX = params.inputMotionVectorBase.x;
+            const UINT mvBaseY = params.inputMotionVectorBase.y;
+            if (mvBaseX < motionDesc.Width && mvBaseY < motionDesc.Height &&
+                ValheimNr_Dx11::ProcessBeforeXeSS(DeviceContext,
+                    colorTexture.Get(), motionTexture.Get(),
+                    params.inputWidth, params.inputHeight,
+                    params.inputColorBase.x, params.inputColorBase.y,
+                    mvBaseX, mvBaseY,
+                    motionDesc.Width - mvBaseX,
+                    motionDesc.Height - mvBaseY,
+                    MVScaleX, MVScaleY, params.resetHistory != 0,
+                    nrColor, nrError))
+            {
+                params.pColorTexture = nrColor.Get();
+                params.inputColorBase.x = 0;
+                params.inputColorBase.y = 0;
+                _preNrWarningLogged = false;
+            }
+            else if (!nrError.empty() && !_preNrWarningLogged)
+            {
+                LOG_WARN("XeSS pre-upscale SNR unavailable: {}", nrError);
+                _preNrWarningLogged = true;
+            }
+        }
+    }
 
     LOG_DEBUG("Executing!!");
     xessResult = XeSSProxy::D3D11Execute()(_xessContext, &params);

@@ -20,6 +20,7 @@
 namespace ValheimNr_Dx11 {
 namespace {
 using Microsoft::WRL::ComPtr;
+std::mutex g_interop_mutex;
 
 bool IsSupported(DXGI_FORMAT format) {
     return format == DXGI_FORMAT_R16G16B16A16_FLOAT ||
@@ -40,6 +41,7 @@ struct Session {
     ComPtr<ID3D12GraphicsCommandList> list;
     Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C color {};
     Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C output {};
+    Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C motion {};
     ArcNrSyclLoader provider;
     ArcNrSyclOwnedListBridge bridge;
     UINT width = 0;
@@ -59,6 +61,7 @@ struct Session {
         bridge.Reset();
         Dx11WithDx12::ReleaseSharedResource(&color);
         Dx11WithDx12::ReleaseSharedResource(&output);
+        Dx11WithDx12::ReleaseSharedResource(&motion);
         output11.Reset();
         list.Reset();
         allocator.Reset();
@@ -153,23 +156,39 @@ struct Session {
         return true;
     }
 
-    bool Process(IDXGISwapChain* swapchain, ID3D11Device* device,
-                 std::string& error) {
-        ComPtr<ID3D11Texture2D> backbuffer;
-        HRESULT hr = swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer));
-        if (FAILED(hr) || !backbuffer) {
-            error = "D3D11 NR backbuffer is unavailable";
+    bool ProcessTexture(ID3D11Texture2D* input, ID3D11Device* device,
+                        ID3D11Texture2D* motion_input,
+                        UINT input_width, UINT input_height,
+                        UINT motion_base_x, UINT motion_base_y,
+                        UINT motion_width, UINT motion_height,
+                        float motion_scale_x, float motion_scale_y,
+                        bool external_reset, bool copy_back,
+                        ComPtr<ID3D11Texture2D>* result,
+                        std::string& error) {
+        // Dx11WithDx12 maintains process-wide D3D11/D3D12 synchronization
+        // objects. Present and pre-XeSS sessions must not rebind them at once.
+        std::lock_guard<std::mutex> interop_lock(g_interop_mutex);
+        if (!input) {
+            error = "D3D11 NR input is unavailable";
             return false;
         }
         D3D11_TEXTURE2D_DESC desc {};
-        backbuffer->GetDesc(&desc);
+        input->GetDesc(&desc);
         if (!IsSupported(desc.Format) || desc.SampleDesc.Count != 1 ||
-            desc.Width == 0 || desc.Height == 0) {
-            error = "D3D11 NR backbuffer unsupported: format=" +
+            desc.Width == 0 || desc.Height == 0 ||
+            desc.Width != input_width || desc.Height != input_height) {
+            error = "D3D11 NR input unsupported: format=" +
                     std::to_string(static_cast<int>(desc.Format)) +
                     " samples=" + std::to_string(desc.SampleDesc.Count) +
                     " size=" + std::to_string(desc.Width) + "x" +
                     std::to_string(desc.Height);
+            return false;
+        }
+        if (motion_input &&
+            (motion_width == 0 || motion_height == 0 ||
+             !std::isfinite(motion_scale_x) ||
+             !std::isfinite(motion_scale_y))) {
+            error = "D3D11 NR motion metadata is invalid";
             return false;
         }
         if (device11.Get() != device || width != desc.Width ||
@@ -181,12 +200,17 @@ struct Session {
                      static_cast<int>(desc.Format));
             if (!Initialize(device, desc, error)) return false;
         }
+        Dx11WithDx12::Init(device11.Get(), context11.Get(),
+                           device12.Get(), queue12.Get());
         if (!Dx11WithDx12::PrepareTextureFrom11To12(
-                "D3D11 NR color", device12.Get(), backbuffer.Get(), &color,
+                "D3D11 NR color", device12.Get(), input, &color,
                 true, false, false, 0) ||
             !Dx11WithDx12::PrepareTextureFrom11To12(
                 "D3D11 NR output", device12.Get(), output11.Get(), &output,
-                false, false, false, 0)) {
+                false, false, false, 0) ||
+            (motion_input && !Dx11WithDx12::PrepareTextureFrom11To12(
+                "D3D11 NR motion", device12.Get(), motion_input, &motion,
+                true, false, false, 0))) {
             error = "D3D11 NR shared texture preparation failed";
             return false;
         }
@@ -194,21 +218,23 @@ struct Session {
             error = "D3D11 NR D3D11 to D3D12 fence failed";
             return false;
         }
-        hr = allocator->Reset();
+        HRESULT hr = allocator->Reset();
         if (SUCCEEDED(hr)) hr = list->Reset(allocator.Get(), nullptr);
         if (FAILED(hr)) {
             error = "D3D11 NR D3D12 command list reset failed";
             return false;
         }
         auto* cfg = Config::Instance();
-        const bool estimate_motion = cfg->DlssNrEstimateMotion.value_or_default();
+        const bool estimate_motion = !motion_input &&
+            cfg->DlssNrEstimateMotion.value_or_default();
         if (estimate_motion != previous_estimate_motion)
             history_invalid = true;
         previous_estimate_motion = estimate_motion;
         ArcNrSyclFrame frame {};
         frame.struct_size = sizeof(frame);
         frame.frame_index = frame_index++;
-        frame.reset_history = !estimate_motion || history_invalid;
+        frame.reset_history = external_reset || history_invalid ||
+            (!estimate_motion && !motion_input);
         const auto strength_q10 = [](float value) -> uint32_t {
             return static_cast<uint32_t>(std::lround(
                 std::clamp(value, 0.0f, 4095.0f / 1024.0f) * 1024.0f));
@@ -230,8 +256,10 @@ struct Session {
         bool recording = true;
         const bool ok = bridge.Run(device12.Get(), queue12.Get(), list.Get(),
             allocator.Get(), color.Dx12Resource, D3D12_RESOURCE_STATE_COMMON,
-            output.Dx12Resource, D3D12_RESOURCE_STATE_COMMON, nullptr,
-            0, 0, 0, 0, 0.0f, 0.0f, provider, frame, recording, error,
+            output.Dx12Resource, D3D12_RESOURCE_STATE_COMMON,
+            motion_input ? motion.Dx12Resource : nullptr,
+            motion_width, motion_height, motion_base_x, motion_base_y,
+            motion_scale_x, motion_scale_y, provider, frame, recording, error,
             estimate_motion);
         if (recording) list->Close();
         if (!ok) return false;
@@ -240,14 +268,34 @@ struct Session {
             error = "D3D11 NR D3D12 to D3D11 fence failed";
             return false;
         }
-        if (cfg->DlssNrApplyModel.value_or_default())
-            context11->CopyResource(backbuffer.Get(), output11.Get());
+        if (copy_back && cfg->DlssNrApplyModel.value_or_default())
+            context11->CopyResource(input, output11.Get());
+        if (result) *result = output11;
         return true;
+    }
+
+    bool Process(IDXGISwapChain* swapchain, ID3D11Device* device,
+                 std::string& error) {
+        ComPtr<ID3D11Texture2D> backbuffer;
+        const HRESULT hr = swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer));
+        if (FAILED(hr) || !backbuffer) {
+            error = "D3D11 NR backbuffer is unavailable";
+            return false;
+        }
+        D3D11_TEXTURE2D_DESC desc {};
+        backbuffer->GetDesc(&desc);
+        return ProcessTexture(backbuffer.Get(), device, nullptr,
+                              desc.Width, desc.Height, 0, 0, 0, 0,
+                              0.0f, 0.0f, false, true, nullptr, error);
     }
 };
 
 Session g_session;
 std::mutex g_session_mutex;
+Session g_pre_xess_session;
+std::mutex g_pre_xess_mutex;
+ComPtr<ID3D11Texture2D> g_pre_xess_subrect_input11;
+ComPtr<ID3D11Device> g_pre_xess_subrect_device;
 std::atomic<bool> g_running {false};
 std::atomic<double> g_last_ms {0.0};
 std::string g_failure_reason;
@@ -278,6 +326,7 @@ void BeforePresent(IDXGISwapChain* swapchain, ID3D11Device* device) {
         // Otherwise a stage load can still compete with the resident model,
         // despite no neural frame being submitted.
         if (g_session.device11) {
+            std::lock_guard<std::mutex> interop_lock(g_interop_mutex);
             g_session.Release();
             LOG_INFO("D3D11 Present SYCL NR disabled: released model session and shared textures");
         }
@@ -317,9 +366,117 @@ std::string FailureReason() {
 }
 void RetryAfterFailure() {
     std::lock_guard<std::mutex> lock(g_session_mutex);
+    std::lock_guard<std::mutex> interop_lock(g_interop_mutex);
     g_session.Release();
     g_session.failed = false;
     g_failure_reason.clear();
     g_running = false;
+}
+
+bool ProcessBeforeXeSS(ID3D11DeviceContext* context,
+                       ID3D11Texture2D* color,
+                       ID3D11Texture2D* motion_input,
+                       UINT input_width, UINT input_height,
+                       UINT color_base_x, UINT color_base_y,
+                       UINT motion_base_x, UINT motion_base_y,
+                       UINT motion_width, UINT motion_height,
+                       float motion_scale_x, float motion_scale_y,
+                       bool reset_history,
+                       ComPtr<ID3D11Texture2D>& result,
+                       std::string& error) {
+    std::lock_guard<std::mutex> lock(g_pre_xess_mutex);
+    result.Reset();
+    const auto* cfg = Config::Instance();
+    if (!cfg->DlssNrEnabled.value_or_default() ||
+        cfg->DlssNrBackend.value_or_default() != 1) {
+        if (g_pre_xess_session.device11) {
+            std::lock_guard<std::mutex> interop_lock(g_interop_mutex);
+            g_pre_xess_session.Release();
+        }
+        g_pre_xess_subrect_input11.Reset();
+        g_pre_xess_subrect_device.Reset();
+        g_pre_xess_session.failed = false;
+        return false;
+    }
+    if (!context || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE ||
+        !color || !motion_input || input_width == 0 || input_height == 0) {
+        error = "XeSS pre-upscale SNR needs immediate context, color and motion";
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC color_desc {}, motion_desc {};
+    color->GetDesc(&color_desc);
+    motion_input->GetDesc(&motion_desc);
+    const bool motion_format =
+        motion_desc.Format == DXGI_FORMAT_R16G16_FLOAT ||
+        motion_desc.Format == DXGI_FORMAT_R16G16_TYPELESS ||
+        motion_desc.Format == DXGI_FORMAT_R32G32_FLOAT ||
+        motion_desc.Format == DXGI_FORMAT_R32G32_TYPELESS;
+    if (!motion_format || motion_desc.SampleDesc.Count != 1 ||
+        !IsSupported(color_desc.Format) || color_desc.SampleDesc.Count != 1 ||
+        color_desc.ArraySize != 1 || color_desc.MipLevels != 1 ||
+        color_base_x >= color_desc.Width ||
+        color_base_y >= color_desc.Height ||
+        input_width > color_desc.Width - color_base_x ||
+        input_height > color_desc.Height - color_base_y ||
+        motion_base_x >= motion_desc.Width ||
+        motion_base_y >= motion_desc.Height ||
+        motion_width == 0 || motion_height == 0 ||
+        motion_width > motion_desc.Width - motion_base_x ||
+        motion_height > motion_desc.Height - motion_base_y) {
+        error = "XeSS pre-upscale SNR requires a supported color subrect and valid R16G16/R32G32 motion";
+        return false;
+    }
+    ComPtr<ID3D11Device> device;
+    context->GetDevice(&device);
+    if (!device) {
+        error = "XeSS pre-upscale D3D11 device is unavailable";
+        return false;
+    }
+    if (g_pre_xess_session.failed) return false;
+    ID3D11Texture2D* nr_input = color;
+    if (color_base_x || color_base_y || color_desc.Width != input_width ||
+        color_desc.Height != input_height) {
+        D3D11_TEXTURE2D_DESC extracted_desc = color_desc;
+        extracted_desc.Width = input_width;
+        extracted_desc.Height = input_height;
+        extracted_desc.Usage = D3D11_USAGE_DEFAULT;
+        extracted_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        extracted_desc.CPUAccessFlags = 0;
+        extracted_desc.MiscFlags = 0;
+        D3D11_TEXTURE2D_DESC cached_desc {};
+        if (g_pre_xess_subrect_input11)
+            g_pre_xess_subrect_input11->GetDesc(&cached_desc);
+        if (!g_pre_xess_subrect_input11 ||
+            g_pre_xess_subrect_device.Get() != device.Get() ||
+            cached_desc.Width != extracted_desc.Width ||
+            cached_desc.Height != extracted_desc.Height ||
+            cached_desc.Format != extracted_desc.Format) {
+            g_pre_xess_subrect_input11.Reset();
+            g_pre_xess_subrect_device.Reset();
+            const HRESULT hr = device->CreateTexture2D(
+                &extracted_desc, nullptr, &g_pre_xess_subrect_input11);
+            if (FAILED(hr)) {
+                error = "XeSS pre-upscale SNR color subrect texture creation failed";
+                return false;
+            }
+            g_pre_xess_subrect_device = device;
+        }
+        const D3D11_BOX source_box {color_base_x, color_base_y, 0,
+            color_base_x + input_width, color_base_y + input_height, 1};
+        context->CopySubresourceRegion(g_pre_xess_subrect_input11.Get(),
+                                      0, 0, 0, 0, color, 0, &source_box);
+        nr_input = g_pre_xess_subrect_input11.Get();
+    }
+    if (!g_pre_xess_session.ProcessTexture(nr_input, device.Get(), motion_input,
+            input_width, input_height, motion_base_x, motion_base_y,
+            motion_width, motion_height, motion_scale_x, motion_scale_y,
+            reset_history, false, &result, error)) {
+        g_pre_xess_session.failed = true;
+        std::lock_guard<std::mutex> interop_lock(g_interop_mutex);
+        g_pre_xess_session.Release();
+        LOG_ERROR("XeSS pre-upscale SYCL NR skipped: {}", error);
+        return false;
+    }
+    return cfg->DlssNrApplyModel.value_or_default();
 }
 }

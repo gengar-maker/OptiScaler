@@ -15,6 +15,7 @@ class XeSSFeature_Dx11 : public virtual IFeature_Dx11
 
     uint32_t _xessInitFlags = 0;
     int dumpCount = 0;
+    bool _preNrWarningLogged = false;
 
   public:
     // version is above 1.3 if we can use vulkan

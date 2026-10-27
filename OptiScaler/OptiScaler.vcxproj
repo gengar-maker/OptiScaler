@@ -425,6 +425,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="dlssnr\sycl\ArcNrSyclLoader.h" />
     <ClInclude Include="dlssnr\sycl\ArcNrSyclOwnedListBridge.h" />
     <ClInclude Include="dlssnr\sycl\ValheimNr_Dx11.h" />
+    <ClInclude Include="hooks\D3D11_FrameTrace.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScan.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_pm_PShader.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_pm_VShader.h" />
@@ -794,6 +795,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="inputs\FSR2_Dx12.cpp" />
     <ClCompile Include="inputs\FSR3_Dx12.cpp" />
     <ClCompile Include="hooks\D3D11_Hooks.cpp" />
+    <ClCompile Include="hooks\D3D11_FrameTrace.cpp" />
     <ClCompile Include="hooks\Vulkan_Hooks.cpp" />
     <ClCompile Include="menu\menu_common.cpp" />
     <ClCompile Include="menu\menu_dx_base.cpp" />

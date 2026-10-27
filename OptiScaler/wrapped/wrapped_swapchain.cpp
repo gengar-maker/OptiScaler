@@ -7,6 +7,7 @@
 #include <nvapi/fakenvapi.h>
 #include <hooks/Reflex_Hooks.h>
 #include <hooks/D3D12_Hooks.h>
+#include <hooks/D3D11_FrameTrace.h>
 
 #include <menu/menu_overlay_dx.h>
 
@@ -366,7 +367,10 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         // Valheim renders without an intercepted upscaler call. Process the
         // game's finished D3D11 frame before OptiScaler draws its overlay.
         if (isD3D11)
+        {
+            D3D11FrameTrace::BeforePresent(pSwapChain, device);
             ValheimNr_Dx11::BeforePresent(pSwapChain, device);
+        }
 
         // Draw overlay
         MenuOverlayDx::Present(pSwapChain, SyncInterval, Flags, pPresentParameters, pDevice, hWnd, isUWP);

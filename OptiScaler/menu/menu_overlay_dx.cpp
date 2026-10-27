@@ -9,6 +9,7 @@
 #include <imgui/imgui_impl_dx11.h>
 #include <imgui/imgui_impl_dx12.h>
 #include <imgui/imgui_impl_win32.h>
+#include <array>
 
 // menu
 static int const NUM_BACK_BUFFERS = 8;
@@ -197,6 +198,65 @@ static void CleanupRenderTargetDx11(bool shutDown)
     _isInited = false;
 }
 
+// Binding the swapchain as an RTV unbinds any shader resource views of that
+// same texture. The ImGui backend saves only PS slot 0, while games can keep
+// the backbuffer in any shader stage/slot across Present.
+struct SavedD3D11OverlayBindings
+{
+    static constexpr UINT Slots = D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;
+    ID3D11DeviceContext* context;
+    std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> rtvs {};
+    ID3D11DepthStencilView* depth = nullptr;
+    std::array<ID3D11ShaderResourceView*, Slots> vs {}, ps {}, gs {}, hs {}, ds {}, cs {};
+    ID3D11HullShader* hullShader = nullptr;
+    ID3D11DomainShader* domainShader = nullptr;
+    ID3D11ComputeShader* computeShader = nullptr;
+    std::array<ID3D11ClassInstance*, 256> hullInstances {}, domainInstances {}, computeInstances {};
+    UINT hullInstanceCount = static_cast<UINT>(hullInstances.size());
+    UINT domainInstanceCount = static_cast<UINT>(domainInstances.size());
+    UINT computeInstanceCount = static_cast<UINT>(computeInstances.size());
+
+    explicit SavedD3D11OverlayBindings(ID3D11DeviceContext* ctx) : context(ctx)
+    {
+        context->OMGetRenderTargets(static_cast<UINT>(rtvs.size()), rtvs.data(), &depth);
+        context->VSGetShaderResources(0, Slots, vs.data());
+        context->PSGetShaderResources(0, Slots, ps.data());
+        context->GSGetShaderResources(0, Slots, gs.data());
+        context->HSGetShaderResources(0, Slots, hs.data());
+        context->DSGetShaderResources(0, Slots, ds.data());
+        context->CSGetShaderResources(0, Slots, cs.data());
+        context->HSGetShader(&hullShader, hullInstances.data(), &hullInstanceCount);
+        context->DSGetShader(&domainShader, domainInstances.data(), &domainInstanceCount);
+        context->CSGetShader(&computeShader, computeInstances.data(), &computeInstanceCount);
+    }
+
+    ~SavedD3D11OverlayBindings()
+    {
+        context->OMSetRenderTargets(static_cast<UINT>(rtvs.size()), rtvs.data(), depth);
+        context->VSSetShaderResources(0, Slots, vs.data());
+        context->PSSetShaderResources(0, Slots, ps.data());
+        context->GSSetShaderResources(0, Slots, gs.data());
+        context->HSSetShaderResources(0, Slots, hs.data());
+        context->DSSetShaderResources(0, Slots, ds.data());
+        context->CSSetShaderResources(0, Slots, cs.data());
+        context->HSSetShader(hullShader, hullInstances.data(), hullInstanceCount);
+        context->DSSetShader(domainShader, domainInstances.data(), domainInstanceCount);
+        context->CSSetShader(computeShader, computeInstances.data(), computeInstanceCount);
+        for (auto* rtv : rtvs) if (rtv) rtv->Release();
+        if (depth) depth->Release();
+        const auto releaseViews = [](const auto& views) {
+            for (auto* view : views) if (view) view->Release();
+        };
+        releaseViews(vs); releaseViews(ps); releaseViews(gs);
+        releaseViews(hs); releaseViews(ds); releaseViews(cs);
+        if (hullShader) hullShader->Release();
+        if (domainShader) domainShader->Release();
+        if (computeShader) computeShader->Release();
+        releaseViews(hullInstances); releaseViews(domainInstances);
+        releaseViews(computeInstances);
+    }
+};
+
 static void RenderImGui_DX11(IDXGISwapChain* pSwapChain)
 {
     bool drawMenu = false;
@@ -253,6 +313,7 @@ static void RenderImGui_DX11(IDXGISwapChain* pSwapChain)
             {
                 ImGui::Render();
 
+                SavedD3D11OverlayBindings savedBindings(g_pd3dDeviceContext);
                 g_pd3dDeviceContext->OMSetRenderTargets(1, &g_pd3dRenderTarget, NULL);
                 ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
             }
