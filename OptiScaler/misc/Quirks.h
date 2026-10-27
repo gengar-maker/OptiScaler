@@ -274,6 +274,10 @@ static const QuirkEntry quirkTable[] = {
     QUIRK_ENTRY("ffxiv_dx11.exe", GameQuirk::DisableVsyncOverride),
     QUIRK_ENTRY("graphadapterdesc.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
 
+    // Tekken 7 requests D3D11 feature level 11_0. Elevating it to 11_1
+    // causes a cyan veil and incorrect colors with the DXGI overlay active.
+    QUIRK_ENTRY_UE(tekkengame, GameQuirk::SkipD3D11FeatureLevelElevation),
+
     // Prey 2017
     // Requires Prey Luma Remastered mod for upscalers
     QUIRK_ENTRY("prey.exe", GameQuirk::DontUseNTShared, GameQuirk::DisableOptiXessPipelineCreation,
