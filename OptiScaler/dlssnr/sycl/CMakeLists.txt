@@ -9,6 +9,11 @@ endif()
 
 add_subdirectory("${SNR_RUNTIME_DIR}" "${CMAKE_BINARY_DIR}/snr-runtime")
 set_target_properties(arc_nr_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
+option(ARC_NR_SYCL_FAST_DEFAULT
+       "Enable measured approximate Arc SNR fast paths, including 720p alignment" OFF)
+if(ARC_NR_SYCL_FAST_DEFAULT)
+    target_compile_definitions(arc_nr_runtime PRIVATE SNR_GAME_FAST_DEFAULT=1)
+endif()
 
 add_library(arc_nr_sycl SHARED ArcNrSyclProvider.cpp)
 target_compile_features(arc_nr_sycl PRIVATE cxx_std_20)
