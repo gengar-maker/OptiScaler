@@ -34,6 +34,12 @@ On Windows, pass the Intel oneAPI compiler and oneDNN include/library paths
 to CMake, then place `arc_nr_sycl.dll` and its runtime dependencies beside
 OptiScaler. The Windows provider build, standalone invocation, and native
 D3D12 path in Black Myth: Wukong have passed on Intel Arc Pro B70.
+For the full model with fused FFNs, configure
+`-DARC_NR_SYCL_EXACT_FUSED_FFN_DEFAULT=ON`. This profile retains the original
+network shape, complete QK/PV attention and normalization, and all temporal
+inputs. It does not turn on the approximate `ARC_NR_SYCL_FAST_DEFAULT` profile;
+the two CMake options are mutually exclusive. Set `SNR_FUSED_DENSE_FFN=0`
+and `SNR_FUSED_BRANCHED_FFN=0` to compare with the unfused reference path.
 For a reproducible Windows provider build and non-black frame test, follow
 [windows/README.md](windows/README.md). That test does not verify a game's
 native D3D12 command-list boundary.

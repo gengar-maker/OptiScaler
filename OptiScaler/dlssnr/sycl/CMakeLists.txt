@@ -11,8 +11,15 @@ add_subdirectory("${SNR_RUNTIME_DIR}" "${CMAKE_BINARY_DIR}/snr-runtime")
 set_target_properties(arc_nr_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
 option(ARC_NR_SYCL_FAST_DEFAULT
        "Enable measured approximate Arc SNR fast paths, including 720p alignment" OFF)
+option(ARC_NR_SYCL_EXACT_FUSED_FFN_DEFAULT
+       "Fuse full FFN arithmetic without enabling approximate model paths" OFF)
+if(ARC_NR_SYCL_FAST_DEFAULT AND ARC_NR_SYCL_EXACT_FUSED_FFN_DEFAULT)
+    message(FATAL_ERROR "Choose one Arc SNR default profile")
+endif()
 if(ARC_NR_SYCL_FAST_DEFAULT)
     target_compile_definitions(arc_nr_runtime PRIVATE SNR_GAME_FAST_DEFAULT=1)
+elseif(ARC_NR_SYCL_EXACT_FUSED_FFN_DEFAULT)
+    target_compile_definitions(arc_nr_runtime PRIVATE SNR_EXACT_FUSED_FFN_DEFAULT=1)
 endif()
 
 add_library(arc_nr_sycl SHARED ArcNrSyclProvider.cpp)
