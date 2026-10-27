@@ -47,6 +47,9 @@ public:
     {
         return WaitForQueue(device, queue, error);
     }
+    // Release shared heaps and synchronization objects when a D3D11 Present
+    // session is switched off or rebuilt. The bridge object itself is reused.
+    void Reset();
 
 private:
     bool WaitForQueue(ID3D12Device* device, ID3D12CommandQueue* queue,

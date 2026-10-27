@@ -88,9 +88,18 @@ std::string HResult(const char* operation, HRESULT result) {
 }  // namespace
 
 ArcNrSyclOwnedListBridge::~ArcNrSyclOwnedListBridge() {
+    Reset();
+}
+
+void ArcNrSyclOwnedListBridge::Reset() {
     ClearSharedCache();
-    if (fence_event_ != nullptr)
+    fence_.Reset();
+    fence_device_.Reset();
+    fence_value_ = 0;
+    if (fence_event_ != nullptr) {
         CloseHandle(static_cast<HANDLE>(fence_event_));
+        fence_event_ = nullptr;
+    }
 }
 
 void ArcNrSyclOwnedListBridge::ClearSharedCache() {

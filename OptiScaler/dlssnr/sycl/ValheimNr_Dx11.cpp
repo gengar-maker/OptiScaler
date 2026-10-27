@@ -56,6 +56,7 @@ struct Session {
         // Keep the DLL and its selected Level Zero device alive across
         // swapchain resize; only the resolution-dependent session is rebuilt.
         provider.ResetSession();
+        bridge.Reset();
         Dx11WithDx12::ReleaseSharedResource(&color);
         Dx11WithDx12::ReleaseSharedResource(&output);
         output11.Reset();
