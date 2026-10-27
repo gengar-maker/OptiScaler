@@ -51,6 +51,20 @@ public:
 private:
     bool WaitForQueue(ID3D12Device* device, ID3D12CommandQueue* queue,
                       std::string& error);
+    void ClearSharedCache();
+    Microsoft::WRL::ComPtr<ID3D12Device> cache_device_;
+    unsigned long long cache_color_bytes_ = 0;
+    unsigned long long cache_motion_bytes_ = 0;
+    bool cache_ready_ = false;
+    Microsoft::WRL::ComPtr<ID3D12Heap> cache_color_heap_;
+    Microsoft::WRL::ComPtr<ID3D12Heap> cache_output_heap_;
+    Microsoft::WRL::ComPtr<ID3D12Heap> cache_motion_heap_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> cache_color_buffer_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> cache_output_buffer_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> cache_motion_buffer_;
+    void* cache_color_handle_ = nullptr;
+    void* cache_output_handle_ = nullptr;
+    void* cache_motion_handle_ = nullptr;
     Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
     Microsoft::WRL::ComPtr<ID3D12Device> fence_device_;
     void* fence_event_ = nullptr;

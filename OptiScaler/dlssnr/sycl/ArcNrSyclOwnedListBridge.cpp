@@ -88,8 +88,28 @@ std::string HResult(const char* operation, HRESULT result) {
 }  // namespace
 
 ArcNrSyclOwnedListBridge::~ArcNrSyclOwnedListBridge() {
+    ClearSharedCache();
     if (fence_event_ != nullptr)
         CloseHandle(static_cast<HANDLE>(fence_event_));
+}
+
+void ArcNrSyclOwnedListBridge::ClearSharedCache() {
+    if (cache_color_handle_) CloseHandle(static_cast<HANDLE>(cache_color_handle_));
+    if (cache_output_handle_) CloseHandle(static_cast<HANDLE>(cache_output_handle_));
+    if (cache_motion_handle_) CloseHandle(static_cast<HANDLE>(cache_motion_handle_));
+    cache_color_handle_ = nullptr;
+    cache_output_handle_ = nullptr;
+    cache_motion_handle_ = nullptr;
+    cache_color_buffer_.Reset();
+    cache_output_buffer_.Reset();
+    cache_motion_buffer_.Reset();
+    cache_color_heap_.Reset();
+    cache_output_heap_.Reset();
+    cache_motion_heap_.Reset();
+    cache_device_.Reset();
+    cache_color_bytes_ = 0;
+    cache_motion_bytes_ = 0;
+    cache_ready_ = false;
 }
 
 bool ArcNrSyclOwnedListBridge::WaitForQueue(ID3D12Device* device,
@@ -262,73 +282,69 @@ bool ArcNrSyclOwnedListBridge::Run(
     heap_desc.Properties = Heap(D3D12_HEAP_TYPE_DEFAULT);
     heap_desc.Flags = D3D12_HEAP_FLAG_SHARED |
                       D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER;
-    ComPtr<ID3D12Heap> color_heap, output_heap, motion_heap;
-    ComPtr<ID3D12Resource> color_buffer, output_buffer, motion_buffer;
-    HRESULT result = device->CreateHeap(&heap_desc, IID_PPV_ARGS(&color_heap));
-    if (FAILED(result)) {
-        error = HResult("shared color heap allocation", result);
-        return false;
-    }
-    result = device->CreateHeap(&heap_desc, IID_PPV_ARGS(&output_heap));
-    if (FAILED(result)) {
-        error = HResult("shared output heap allocation", result);
-        return false;
-    }
-    result = device->CreatePlacedResource(
-        color_heap.Get(), 0, &buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST,
-        nullptr, IID_PPV_ARGS(&color_buffer));
-    if (FAILED(result)) {
-        error = HResult("shared color buffer allocation", result);
-        return false;
-    }
-    result = device->CreatePlacedResource(
-        output_heap.Get(), 0, &buffer_desc, D3D12_RESOURCE_STATE_COPY_SOURCE,
-        nullptr, IID_PPV_ARGS(&output_buffer));
-    if (FAILED(result)) {
-        error = HResult("shared output buffer allocation", result);
-        return false;
-    }
-    if (motion_usable) {
-        D3D12_HEAP_DESC motion_heap_desc = heap_desc;
-        motion_heap_desc.SizeInBytes = motion_allocation.SizeInBytes;
-        motion_heap_desc.Alignment = motion_allocation.Alignment;
-        result = device->CreateHeap(&motion_heap_desc,
-                                    IID_PPV_ARGS(&motion_heap));
-        if (SUCCEEDED(result))
-            result = device->CreatePlacedResource(
-                motion_heap.Get(), 0, &motion_buffer_desc,
+    const unsigned long long desired_motion_bytes =
+        motion_usable ? motion_total_bytes : 0;
+    if (!cache_ready_ || cache_device_.Get() != device ||
+        cache_color_bytes_ != total_bytes ||
+        cache_motion_bytes_ != desired_motion_bytes) {
+        ClearSharedCache();
+        cache_device_ = device;
+        HRESULT create_result = device->CreateHeap(
+            &heap_desc, IID_PPV_ARGS(&cache_color_heap_));
+        if (SUCCEEDED(create_result))
+            create_result = device->CreateHeap(
+                &heap_desc, IID_PPV_ARGS(&cache_output_heap_));
+        if (SUCCEEDED(create_result))
+            create_result = device->CreatePlacedResource(
+                cache_color_heap_.Get(), 0, &buffer_desc,
                 D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                IID_PPV_ARGS(&motion_buffer));
-        if (FAILED(result)) {
-            error = HResult("shared motion buffer allocation", result);
+                IID_PPV_ARGS(&cache_color_buffer_));
+        if (SUCCEEDED(create_result))
+            create_result = device->CreatePlacedResource(
+                cache_output_heap_.Get(), 0, &buffer_desc,
+                D3D12_RESOURCE_STATE_COPY_SOURCE, nullptr,
+                IID_PPV_ARGS(&cache_output_buffer_));
+        if (SUCCEEDED(create_result) && motion_usable) {
+            D3D12_HEAP_DESC motion_heap_desc = heap_desc;
+            motion_heap_desc.SizeInBytes = motion_allocation.SizeInBytes;
+            motion_heap_desc.Alignment = motion_allocation.Alignment;
+            create_result = device->CreateHeap(
+                &motion_heap_desc, IID_PPV_ARGS(&cache_motion_heap_));
+            if (SUCCEEDED(create_result))
+                create_result = device->CreatePlacedResource(
+                    cache_motion_heap_.Get(), 0, &motion_buffer_desc,
+                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                    IID_PPV_ARGS(&cache_motion_buffer_));
+        }
+        if (FAILED(create_result)) {
+            error = HResult("shared GPU buffer allocation", create_result);
+            ClearSharedCache();
             return false;
         }
-    }
-    struct SharedHandle {
-        HANDLE value = nullptr;
-        ~SharedHandle() { if (value != nullptr) CloseHandle(value); }
-    } color_handle, output_handle, motion_handle;
-    result = device->CreateSharedHandle(color_heap.Get(), nullptr, GENERIC_ALL,
-                                        nullptr, &color_handle.value);
-    if (FAILED(result)) {
-        error = HResult("shared color handle", result);
-        return false;
-    }
-    result = device->CreateSharedHandle(output_heap.Get(), nullptr, GENERIC_ALL,
-                                        nullptr, &output_handle.value);
-    if (FAILED(result)) {
-        error = HResult("shared output handle", result);
-        return false;
-    }
-    if (motion_usable) {
-        result = device->CreateSharedHandle(motion_heap.Get(), nullptr,
-                                            GENERIC_ALL, nullptr,
-                                            &motion_handle.value);
-        if (FAILED(result)) {
-            error = HResult("shared motion handle", result);
+        create_result = device->CreateSharedHandle(
+            cache_color_heap_.Get(), nullptr, GENERIC_ALL, nullptr,
+            reinterpret_cast<HANDLE*>(&cache_color_handle_));
+        if (SUCCEEDED(create_result))
+            create_result = device->CreateSharedHandle(
+                cache_output_heap_.Get(), nullptr, GENERIC_ALL, nullptr,
+                reinterpret_cast<HANDLE*>(&cache_output_handle_));
+        if (SUCCEEDED(create_result) && motion_usable)
+            create_result = device->CreateSharedHandle(
+                cache_motion_heap_.Get(), nullptr, GENERIC_ALL, nullptr,
+                reinterpret_cast<HANDLE*>(&cache_motion_handle_));
+        if (FAILED(create_result)) {
+            error = HResult("shared GPU handle creation", create_result);
+            ClearSharedCache();
             return false;
         }
+        cache_color_bytes_ = total_bytes;
+        cache_motion_bytes_ = desired_motion_bytes;
+        cache_ready_ = true;
     }
+    auto& color_buffer = cache_color_buffer_;
+    auto& output_buffer = cache_output_buffer_;
+    auto& motion_buffer = cache_motion_buffer_;
+    HRESULT result;
     const auto allocated = Clock::now();
 
     D3D12_TEXTURE_COPY_LOCATION source {};
@@ -370,6 +386,7 @@ bool ArcNrSyclOwnedListBridge::Run(
     }
     list_recording = false;
     ID3D12CommandList* producer_lists[] = { owned_list };
+    cache_ready_ = false;
     queue->ExecuteCommandLists(1, producer_lists);
     if (!WaitForQueue(device, queue, error)) return false;
     const auto producer_ready = Clock::now();
@@ -394,13 +411,13 @@ bool ArcNrSyclOwnedListBridge::Run(
     ArcNrSyclGpuFrame gpu_frame {};
     gpu_frame.struct_size = sizeof(gpu_frame);
     gpu_frame.controls = frame;
-    gpu_frame.color_heap_nt_handle = color_handle.value;
-    gpu_frame.output_heap_nt_handle = output_handle.value;
+    gpu_frame.color_heap_nt_handle = cache_color_handle_;
+    gpu_frame.output_heap_nt_handle = cache_output_handle_;
     gpu_frame.heap_bytes = allocation.SizeInBytes;
     gpu_frame.row_pitch_bytes = footprint.Footprint.RowPitch;
     gpu_frame.pixel_format = color_format;
     if (motion_usable) {
-        gpu_frame.motion_heap_nt_handle = motion_handle.value;
+        gpu_frame.motion_heap_nt_handle = cache_motion_handle_;
         gpu_frame.motion_heap_bytes = motion_allocation.SizeInBytes;
         gpu_frame.motion_row_pitch_bytes = motion_footprint.Footprint.RowPitch;
         gpu_frame.motion_width = static_cast<UINT>(motion_desc.Width);
@@ -451,6 +468,7 @@ bool ArcNrSyclOwnedListBridge::Run(
     ID3D12CommandList* upload_lists[] = { upload_list.Get() };
     queue->ExecuteCommandLists(1, upload_lists);
     if (!WaitForQueue(device, queue, error)) return false;
+    cache_ready_ = true;
     const auto output_ready = Clock::now();
 
     result = owned_allocator->Reset();
