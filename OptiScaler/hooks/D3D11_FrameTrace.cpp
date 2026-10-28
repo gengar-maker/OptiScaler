@@ -51,6 +51,8 @@ constexpr size_t max_events = 4096;
 constexpr size_t max_shader_bytes = 64 * 1024 * 1024;
 constexpr uint64_t tekken_taa_shader_fnv = 0xfb8a6b0e8667f10dull;
 bool taa_inputs_dumped = false;
+std::atomic<bool> taa_input_capture_pending {false};
+std::atomic<ID3D11PixelShader*> tekken_taa_shader {nullptr};
 
 uint64_t ShaderHash(const std::vector<uint8_t>& bytes) {
     uint64_t hash = 14695981039346656037ull;
@@ -116,7 +118,8 @@ void DumpTexture(ID3D11Device* device, ID3D11DeviceContext* context,
 
 void DumpTaaInputs(ID3D11DeviceContext* context,
                    const std::array<ID3D11ShaderResourceView*, 16>& srvs) {
-    if (taa_inputs_dumped) return;
+    if (taa_inputs_dumped || !srvs[0] || !srvs[1] || !srvs[2] || !srvs[3])
+        return;
     std::error_code error;
     const auto base = Util::DllPath().parent_path() / "OptiScaler.d3d11trace.inputs";
     if (!std::filesystem::exists(base, error)) return;
@@ -135,6 +138,7 @@ void DumpTaaInputs(ID3D11DeviceContext* context,
     DumpTexture(device.Get(), context, srvs[1], base.string() + ".color");
     DumpTexture(device.Get(), context, srvs[2], base.string() + ".history");
     DumpTexture(device.Get(), context, srvs[3], base.string() + ".motion");
+    taa_input_capture_pending.store(false, std::memory_order_release);
     LOG_INFO("D3D11 TAA inputs dumped to {}", base.string());
 }
 
@@ -201,8 +205,25 @@ void AppendViews(std::ostringstream& out, const std::array<View*, N>& views) {
 }
 
 void Record(ID3D11DeviceContext* context, const char* operation) {
-    if (!capturing.load(std::memory_order_relaxed) || context != traced_context)
+    if (context != traced_context) return;
+    const bool record_frame = capturing.load(std::memory_order_relaxed);
+    if (!record_frame) {
+        // The requested TAA pass can appear later than the one frame trace.
+        // Keep watching only its shader until the input dump succeeds.
+        if (!taa_input_capture_pending.load(std::memory_order_acquire) ||
+            operation[0] != 'D') return;
+        ComPtr<ID3D11PixelShader> shader;
+        context->PSGetShader(&shader, nullptr, nullptr);
+        if (shader.Get() != tekken_taa_shader.load(std::memory_order_acquire))
+            return;
+        std::array<ID3D11ShaderResourceView*, 16> inputs {};
+        context->PSGetShaderResources(0, static_cast<UINT>(inputs.size()),
+                                      inputs.data());
+        DumpTaaInputs(context, inputs);
+        for (auto* view : inputs)
+            if (view) view->Release();
         return;
+    }
     // Get* methods add references; release every returned object below.
     std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> rtvs {};
     ComPtr<ID3D11DepthStencilView> depth;
@@ -269,6 +290,13 @@ HRESULT WINAPI HookCreatePixelShader(ID3D11Device* device, const void* bytecode,
     const HRESULT result = original_create_pixel_shader(device, bytecode,
                                                          bytecode_size, linkage, shader);
     if (SUCCEEDED(result) && shader && *shader && bytecode && bytecode_size) {
+        if (bytecode_size == 6332) {
+            std::vector<uint8_t> candidate(
+                static_cast<const uint8_t*>(bytecode),
+                static_cast<const uint8_t*>(bytecode) + bytecode_size);
+            if (ShaderHash(candidate) == tekken_taa_shader_fnv)
+                tekken_taa_shader.store(*shader, std::memory_order_release);
+        }
         std::lock_guard lock(trace_mutex);
         const auto existing = pixel_shader_code.find(*shader);
         const size_t old_size = existing == pixel_shader_code.end() ? 0 :
@@ -310,6 +338,10 @@ void Install(ID3D11Device* device) {
     std::error_code error;
     if (!std::filesystem::exists(Util::DllPath().parent_path() /
                                  "OptiScaler.d3d11trace", error)) return;
+    taa_input_capture_pending.store(
+        std::filesystem::exists(Util::DllPath().parent_path() /
+                                "OptiScaler.d3d11trace.inputs", error),
+        std::memory_order_release);
     ComPtr<ID3D11DeviceContext> context;
     device->GetImmediateContext(&context);
     if (!context) return;
@@ -433,6 +465,8 @@ void BeforePresent(IDXGISwapChain*, ID3D11Device* device) {
 
 void Uninstall() {
     capturing.store(false, std::memory_order_release);
+    taa_input_capture_pending.store(false, std::memory_order_release);
+    tekken_taa_shader.store(nullptr, std::memory_order_release);
     if (!original_draw) return;
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
