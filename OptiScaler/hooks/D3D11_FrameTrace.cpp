@@ -120,6 +120,23 @@ void DumpTaaInputs(ID3D11DeviceContext* context,
                    const std::array<ID3D11ShaderResourceView*, 16>& srvs) {
     if (taa_inputs_dumped || !srvs[0] || !srvs[1] || !srvs[2] || !srvs[3])
         return;
+    auto texture_desc = [](ID3D11ShaderResourceView* view,
+                           D3D11_TEXTURE2D_DESC& desc) {
+        ComPtr<ID3D11Resource> resource;
+        view->GetResource(&resource);
+        ComPtr<ID3D11Texture2D> texture;
+        if (FAILED(resource.As(&texture))) return false;
+        texture->GetDesc(&desc);
+        return true;
+    };
+    D3D11_TEXTURE2D_DESC depth {}, color {}, history {}, motion {};
+    if (!texture_desc(srvs[0], depth) || !texture_desc(srvs[1], color) ||
+        !texture_desc(srvs[2], history) || !texture_desc(srvs[3], motion) ||
+        color.Width < 640 || color.Height < 360 ||
+        depth.Width != color.Width || depth.Height != color.Height ||
+        history.Width != color.Width || history.Height != color.Height ||
+        motion.Width != color.Width || motion.Height != color.Height)
+        return;
     std::error_code error;
     const auto base = Util::DllPath().parent_path() / "OptiScaler.d3d11trace.inputs";
     if (!std::filesystem::exists(base, error)) return;
