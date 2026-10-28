@@ -7,6 +7,7 @@
 #include <iostream>
 #include <chrono>
 #include <memory>
+#include <string>
 #include <vector>
 #include <stdexcept>
 #include <string>
@@ -43,18 +44,17 @@ static void Wait(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64 value) {
 }
 int main(int argc, char** argv) {
     try {
-        if (argc != 5 && argc != 7 && argc != 8) throw std::runtime_error("usage: arc_nr_sycl_provider_gpu_smoke LOGICAL DERIVED INPUT OUTPUT [WIDTH HEIGHT [--temporal|--temporal-shift|--temporal-shift4|--estimate|--estimate-shift4|--rgba8|--rgb10a2]]");
+        if (argc != 5 && argc != 7 && argc != 8) throw std::runtime_error("usage: arc_nr_sycl_provider_gpu_smoke LOGICAL DERIVED INPUT OUTPUT [WIDTH HEIGHT [--temporal|--temporal-shift|--temporal-shift4|--motion-file=PATH|--estimate|--estimate-shift4|--rgba8|--rgb10a2]]");
+        const std::string mode = argc == 8 ? argv[7] : "";
+        const bool motion_file = mode.starts_with("--motion-file=");
         const bool temporal = argc == 8 &&
-            (std::string(argv[7]) == "--temporal" ||
-             std::string(argv[7]) == "--temporal-shift" ||
-             std::string(argv[7]) == "--temporal-shift4");
-        const bool shift = argc == 8 && std::string(argv[7]) == "--temporal-shift";
-        const bool shift4 = argc == 8 && (std::string(argv[7]) == "--temporal-shift4" ||
-                                          std::string(argv[7]) == "--estimate-shift4");
-        const bool estimate = argc == 8 && (std::string(argv[7]) == "--estimate" ||
-                                             std::string(argv[7]) == "--estimate-shift4");
-        const bool rgba8 = argc == 8 && std::string(argv[7]) == "--rgba8";
-        const bool rgb10a2 = argc == 8 && std::string(argv[7]) == "--rgb10a2";
+            (mode == "--temporal" || mode == "--temporal-shift" ||
+             mode == "--temporal-shift4" || motion_file);
+        const bool shift = mode == "--temporal-shift";
+        const bool shift4 = mode == "--temporal-shift4" || mode == "--estimate-shift4";
+        const bool estimate = mode == "--estimate" || mode == "--estimate-shift4";
+        const bool rgba8 = mode == "--rgba8";
+        const bool rgb10a2 = mode == "--rgb10a2";
         if (argc == 8 && !temporal && !estimate && !rgba8 && !rgb10a2) throw std::runtime_error("expected temporal, estimate, RGBA8 or RGB10A2 mode");
         const UINT width = argc >= 7 ? static_cast<UINT>(std::stoul(argv[5])) : 320;
         const UINT height = argc >= 7 ? static_cast<UINT>(std::stoul(argv[6])) : 320;
@@ -129,7 +129,18 @@ int main(int argc, char** argv) {
             D3D12_RANGE empty{0,0};
             Check(motion_upload->Map(0, &empty, &motion_data), "motion Map");
             memset(motion_data, 0, bytes);
-            if (shift || (shift4 && temporal)) {
+            if (motion_file) {
+                const auto path = mode.substr(sizeof("--motion-file=") - 1);
+                if (path.empty()) throw std::runtime_error("motion file path is empty");
+                const auto motion_bytes = UINT64(width) * height * 4;
+                std::ifstream input_motion(path, std::ios::binary | std::ios::ate);
+                if (!input_motion || input_motion.tellg() !=
+                    static_cast<std::streamoff>(motion_bytes))
+                    throw std::runtime_error("motion file has wrong size");
+                input_motion.seekg(0);
+                if (!input_motion.read(static_cast<char*>(motion_data), motion_bytes))
+                    throw std::runtime_error("motion file read failed");
+            } else if (shift || (shift4 && temporal)) {
                 auto* values = static_cast<uint16_t*>(motion_data);
                 for (UINT64 i = 0; i < UINT64(width) * height; ++i)
                     values[2 * i] = shift4 ? 0x4400u : 0x3c00u;
