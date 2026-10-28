@@ -49,6 +49,94 @@ unsigned present_count = 0;
 uint64_t event_count = 0;
 constexpr size_t max_events = 4096;
 constexpr size_t max_shader_bytes = 64 * 1024 * 1024;
+constexpr uint64_t tekken_taa_shader_fnv = 0xfb8a6b0e8667f10dull;
+bool taa_inputs_dumped = false;
+
+uint64_t ShaderHash(const std::vector<uint8_t>& bytes) {
+    uint64_t hash = 14695981039346656037ull;
+    for (uint8_t byte : bytes)
+        hash = (hash ^ byte) * 1099511628211ull;
+    return hash;
+}
+
+void DumpConstantBuffer(ID3D11Device* device, ID3D11DeviceContext* context,
+                        ID3D11Buffer* source, const std::filesystem::path& path) {
+    if (!source) return;
+    D3D11_BUFFER_DESC desc {};
+    source->GetDesc(&desc);
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
+    desc.StructureByteStride = 0;
+    ComPtr<ID3D11Buffer> staging;
+    if (FAILED(device->CreateBuffer(&desc, nullptr, &staging))) return;
+    context->CopyResource(staging.Get(), source);
+    D3D11_MAPPED_SUBRESOURCE mapped {};
+    if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return;
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (file) file.write(static_cast<const char*>(mapped.pData), desc.ByteWidth);
+    context->Unmap(staging.Get(), 0);
+}
+
+void DumpTexture(ID3D11Device* device, ID3D11DeviceContext* context,
+                 ID3D11ShaderResourceView* view, const std::filesystem::path& base) {
+    if (!view) return;
+    ComPtr<ID3D11Resource> resource;
+    view->GetResource(&resource);
+    ComPtr<ID3D11Texture2D> source;
+    if (FAILED(resource.As(&source))) return;
+    D3D11_TEXTURE2D_DESC desc {};
+    source->GetDesc(&desc);
+    if (desc.ArraySize != 1 || desc.MipLevels != 1 || desc.SampleDesc.Count != 1)
+        return;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> staging;
+    if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging))) return;
+    context->CopyResource(staging.Get(), source.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped {};
+    if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return;
+    std::ofstream file(base.string() + ".bin", std::ios::binary | std::ios::trunc);
+    if (file) {
+        for (UINT row = 0; row < desc.Height; ++row)
+            file.write(static_cast<const char*>(mapped.pData) +
+                           static_cast<size_t>(row) * mapped.RowPitch,
+                       mapped.RowPitch);
+    }
+    context->Unmap(staging.Get(), 0);
+    std::ofstream metadata(base.string() + ".txt", std::ios::trunc);
+    if (metadata)
+        metadata << "width=" << desc.Width << "\nheight=" << desc.Height
+                 << "\nformat=" << static_cast<unsigned>(desc.Format)
+                 << "\nrow_pitch=" << mapped.RowPitch << "\n";
+}
+
+void DumpTaaInputs(ID3D11DeviceContext* context,
+                   const std::array<ID3D11ShaderResourceView*, 16>& srvs) {
+    if (taa_inputs_dumped) return;
+    std::error_code error;
+    const auto base = Util::DllPath().parent_path() / "OptiScaler.d3d11trace.inputs";
+    if (!std::filesystem::exists(base, error)) return;
+    taa_inputs_dumped = true;
+    ComPtr<ID3D11Device> device;
+    context->GetDevice(&device);
+    if (!device) return;
+    std::array<ID3D11Buffer*, 2> buffers {};
+    context->PSGetConstantBuffers(0, static_cast<UINT>(buffers.size()), buffers.data());
+    for (size_t i = 0; i < buffers.size(); ++i) {
+        DumpConstantBuffer(device.Get(), context, buffers[i],
+                           base.string() + ".cb" + std::to_string(i) + ".bin");
+        if (buffers[i]) buffers[i]->Release();
+    }
+    DumpTexture(device.Get(), context, srvs[0], base.string() + ".depth");
+    DumpTexture(device.Get(), context, srvs[1], base.string() + ".color");
+    DumpTexture(device.Get(), context, srvs[2], base.string() + ".history");
+    DumpTexture(device.Get(), context, srvs[3], base.string() + ".motion");
+    LOG_INFO("D3D11 TAA inputs dumped to {}", base.string());
+}
 
 std::string DescribeResource(ID3D11Resource* resource) {
     if (!resource) return "-";
@@ -131,6 +219,13 @@ void Record(ID3D11DeviceContext* context, const char* operation) {
     } else {
         context->PSGetShaderResources(0, static_cast<UINT>(srvs.size()), srvs.data());
         context->PSGetShader(&pixel_shader, nullptr, nullptr);
+        if (pixel_shader && operation[0] == 'D') {
+            std::lock_guard lock(trace_mutex);
+            const auto it = pixel_shader_code.find(pixel_shader.Get());
+            if (it != pixel_shader_code.end() &&
+                ShaderHash(it->second) == tekken_taa_shader_fnv)
+                DumpTaaInputs(context, srvs);
+        }
     }
     std::ostringstream out;
     out << operation << ';' << (compute ? static_cast<void*>(compute_shader.Get())
