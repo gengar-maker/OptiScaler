@@ -53,6 +53,7 @@ constexpr uint64_t tekken_taa_shader_fnv = 0xfb8a6b0e8667f10dull;
 bool taa_inputs_dumped = false;
 std::atomic<bool> taa_input_capture_pending {false};
 std::atomic<ID3D11PixelShader*> tekken_taa_shader {nullptr};
+thread_local bool taa_output_after_draw = false;
 
 uint64_t ShaderHash(const std::vector<uint8_t>& bytes) {
     uint64_t hash = 14695981039346656037ull;
@@ -81,13 +82,10 @@ void DumpConstantBuffer(ID3D11Device* device, ID3D11DeviceContext* context,
     context->Unmap(staging.Get(), 0);
 }
 
-void DumpTexture(ID3D11Device* device, ID3D11DeviceContext* context,
-                 ID3D11ShaderResourceView* view, const std::filesystem::path& base) {
-    if (!view) return;
-    ComPtr<ID3D11Resource> resource;
-    view->GetResource(&resource);
-    ComPtr<ID3D11Texture2D> source;
-    if (FAILED(resource.As(&source))) return;
+void DumpTextureResource(ID3D11Device* device, ID3D11DeviceContext* context,
+                         ID3D11Texture2D* source,
+                         const std::filesystem::path& base) {
+    if (!source) return;
     D3D11_TEXTURE2D_DESC desc {};
     source->GetDesc(&desc);
     if (desc.ArraySize != 1 || desc.MipLevels != 1 || desc.SampleDesc.Count != 1)
@@ -98,7 +96,7 @@ void DumpTexture(ID3D11Device* device, ID3D11DeviceContext* context,
     desc.MiscFlags = 0;
     ComPtr<ID3D11Texture2D> staging;
     if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging))) return;
-    context->CopyResource(staging.Get(), source.Get());
+    context->CopyResource(staging.Get(), source);
     D3D11_MAPPED_SUBRESOURCE mapped {};
     if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return;
     std::ofstream file(base.string() + ".bin", std::ios::binary | std::ios::trunc);
@@ -114,6 +112,16 @@ void DumpTexture(ID3D11Device* device, ID3D11DeviceContext* context,
         metadata << "width=" << desc.Width << "\nheight=" << desc.Height
                  << "\nformat=" << static_cast<unsigned>(desc.Format)
                  << "\nrow_pitch=" << mapped.RowPitch << "\n";
+}
+
+void DumpTexture(ID3D11Device* device, ID3D11DeviceContext* context,
+                 ID3D11ShaderResourceView* view, const std::filesystem::path& base) {
+    if (!view) return;
+    ComPtr<ID3D11Resource> resource;
+    view->GetResource(&resource);
+    ComPtr<ID3D11Texture2D> source;
+    if (SUCCEEDED(resource.As(&source)))
+        DumpTextureResource(device, context, source.Get(), base);
 }
 
 void DumpTaaInputs(ID3D11DeviceContext* context,
@@ -139,7 +147,7 @@ void DumpTaaInputs(ID3D11DeviceContext* context,
         return;
     std::error_code error;
     const auto base = Util::DllPath().parent_path() / "OptiScaler.d3d11trace.inputs";
-    if (!std::filesystem::exists(base, error)) return;
+    if (!std::filesystem::exists(base.string() + ".arm", error)) return;
     taa_inputs_dumped = true;
     ComPtr<ID3D11Device> device;
     context->GetDevice(&device);
@@ -156,7 +164,39 @@ void DumpTaaInputs(ID3D11DeviceContext* context,
     DumpTexture(device.Get(), context, srvs[2], base.string() + ".history");
     DumpTexture(device.Get(), context, srvs[3], base.string() + ".motion");
     taa_input_capture_pending.store(false, std::memory_order_release);
+    taa_output_after_draw = true;
+    std::filesystem::remove(base.string() + ".arm", error);
     LOG_INFO("D3D11 TAA inputs dumped to {}", base.string());
+}
+
+void DumpTaaOutput(ID3D11DeviceContext* context) {
+    if (!taa_output_after_draw) return;
+    taa_output_after_draw = false;
+    std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> views {};
+    ID3D11DepthStencilView* depth = nullptr;
+    context->OMGetRenderTargets(static_cast<UINT>(views.size()),
+                                views.data(), &depth);
+    if (!views[0]) {
+        for (auto* view : views) if (view) view->Release();
+        if (depth) depth->Release();
+        return;
+    }
+    ComPtr<ID3D11Resource> resource;
+    views[0]->GetResource(&resource);
+    ComPtr<ID3D11Texture2D> texture;
+    if (SUCCEEDED(resource.As(&texture))) {
+        ComPtr<ID3D11Device> device;
+        context->GetDevice(&device);
+        const auto base = Util::DllPath().parent_path() /
+                          "OptiScaler.d3d11trace.inputs.taa_output";
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+        DumpTextureResource(device.Get(), context, texture.Get(), base);
+        context->OMSetRenderTargets(static_cast<UINT>(views.size()),
+                                    views.data(), depth);
+        LOG_INFO("D3D11 TAA output dumped to {}", base.string());
+    }
+    for (auto* view : views) if (view) view->Release();
+    if (depth) depth->Release();
 }
 
 std::string DescribeResource(ID3D11Resource* resource) {
@@ -288,6 +328,7 @@ void WINAPI HookDraw(ID3D11DeviceContext* context, UINT vertex_count, UINT start
 void WINAPI HookDrawIndexed(ID3D11DeviceContext* context, UINT index_count, UINT start_index, INT base_vertex) {
     Record(context, "DrawIndexed");
     original_draw_indexed(context, index_count, start_index, base_vertex);
+    DumpTaaOutput(context);
 }
 void WINAPI HookDrawInstanced(ID3D11DeviceContext* context, UINT vertices, UINT instances, UINT start_vertex, UINT start_instance) {
     Record(context, "DrawInstanced");
@@ -357,7 +398,7 @@ void Install(ID3D11Device* device) {
                                  "OptiScaler.d3d11trace", error)) return;
     taa_input_capture_pending.store(
         std::filesystem::exists(Util::DllPath().parent_path() /
-                                "OptiScaler.d3d11trace.inputs", error),
+                                "OptiScaler.d3d11trace.inputs.arm", error),
         std::memory_order_release);
     ComPtr<ID3D11DeviceContext> context;
     device->GetImmediateContext(&context);
@@ -399,7 +440,7 @@ void Install(ID3D11Device* device) {
 }
 
 void BeforePresent(IDXGISwapChain*, ID3D11Device* device) {
-    if (!original_draw || !device || present_count >= 2) return;
+    if (!original_draw || !device) return;
     if (!traced_device) {
         ComPtr<ID3D11DeviceContext> context;
         device->GetImmediateContext(&context);
@@ -408,6 +449,16 @@ void BeforePresent(IDXGISwapChain*, ID3D11Device* device) {
         traced_context = context.Get();
     }
     if (device != traced_device) return;
+    if (!taa_inputs_dumped &&
+        !taa_input_capture_pending.load(std::memory_order_acquire)) {
+        std::error_code arm_error;
+        if (std::filesystem::exists(Util::DllPath().parent_path() /
+                                    "OptiScaler.d3d11trace.inputs.arm", arm_error)) {
+            taa_input_capture_pending.store(true, std::memory_order_release);
+            LOG_INFO("D3D11 TAA input capture armed for the next full-size pass");
+        }
+    }
+    if (present_count >= 2) return;
     if (present_count == 0) {
         std::error_code error;
         if (!std::filesystem::exists(Util::DllPath().parent_path() /
