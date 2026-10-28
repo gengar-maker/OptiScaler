@@ -3,6 +3,7 @@
 #include "Hook_Utils.h"
 #include <Util.h>
 #include <detours/detours.h>
+#include <d3dcompiler.h>
 #include <array>
 #include <atomic>
 #include <deque>
@@ -11,6 +12,10 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 #include <wrl/client.h>
 
 namespace D3D11FrameTrace {
@@ -21,19 +26,29 @@ using DrawIndexedFn = rewrite_signature<decltype(&ID3D11DeviceContext::DrawIndex
 using DrawInstancedFn = rewrite_signature<decltype(&ID3D11DeviceContext::DrawInstanced)>::type;
 using DrawIndexedInstancedFn = rewrite_signature<decltype(&ID3D11DeviceContext::DrawIndexedInstanced)>::type;
 using DispatchFn = rewrite_signature<decltype(&ID3D11DeviceContext::Dispatch)>::type;
+using CreatePixelShaderFn = rewrite_signature<decltype(&ID3D11Device::CreatePixelShader)>::type;
+using CreateComputeShaderFn = rewrite_signature<decltype(&ID3D11Device::CreateComputeShader)>::type;
 DrawFn original_draw = nullptr;
 DrawIndexedFn original_draw_indexed = nullptr;
 DrawInstancedFn original_draw_instanced = nullptr;
 DrawIndexedInstancedFn original_draw_indexed_instanced = nullptr;
 DispatchFn original_dispatch = nullptr;
+CreatePixelShaderFn original_create_pixel_shader = nullptr;
+CreateComputeShaderFn original_create_compute_shader = nullptr;
 std::mutex trace_mutex;
 std::deque<std::string> events;
+std::unordered_map<ID3D11PixelShader*, std::vector<uint8_t>> pixel_shader_code;
+std::unordered_map<ID3D11ComputeShader*, std::vector<uint8_t>> compute_shader_code;
+std::unordered_set<ID3D11PixelShader*> used_pixel_shaders;
+std::unordered_set<ID3D11ComputeShader*> used_compute_shaders;
+size_t stored_shader_bytes = 0;
 std::atomic<bool> capturing {false};
 ID3D11Device* traced_device = nullptr;
 ID3D11DeviceContext* traced_context = nullptr;
 unsigned present_count = 0;
 uint64_t event_count = 0;
 constexpr size_t max_events = 4096;
+constexpr size_t max_shader_bytes = 64 * 1024 * 1024;
 
 std::string DescribeResource(ID3D11Resource* resource) {
     if (!resource) return "-";
@@ -46,6 +61,16 @@ std::string DescribeResource(ID3D11Resource* resource) {
         out << '@' << desc.Width << 'x' << desc.Height << ':'
             << static_cast<unsigned>(desc.Format);
     }
+    std::array<char, 256> name {};
+    UINT name_size = static_cast<UINT>(name.size());
+    if (SUCCEEDED(resource->GetPrivateData(WKPDID_D3DDebugObjectName,
+                                           &name_size, name.data()))) {
+        out << '#';
+        for (UINT i = 0; i < name_size; ++i) {
+            const char c = name[i];
+            out << ((c == ';' || c == '\n' || c == '\r') ? '_' : c);
+        }
+    }
     return out.str();
 }
 
@@ -53,7 +78,26 @@ template <typename View> std::string DescribeView(View* view) {
     if (!view) return "-";
     ComPtr<ID3D11Resource> resource;
     view->GetResource(&resource);
-    return DescribeResource(resource.Get());
+    std::ostringstream out;
+    out << DescribeResource(resource.Get());
+    if constexpr (std::is_same_v<View, ID3D11ShaderResourceView>) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC desc {};
+        view->GetDesc(&desc);
+        out << '~' << static_cast<unsigned>(desc.Format);
+    } else if constexpr (std::is_same_v<View, ID3D11RenderTargetView>) {
+        D3D11_RENDER_TARGET_VIEW_DESC desc {};
+        view->GetDesc(&desc);
+        out << '~' << static_cast<unsigned>(desc.Format);
+    } else if constexpr (std::is_same_v<View, ID3D11UnorderedAccessView>) {
+        D3D11_UNORDERED_ACCESS_VIEW_DESC desc {};
+        view->GetDesc(&desc);
+        out << '~' << static_cast<unsigned>(desc.Format);
+    } else if constexpr (std::is_same_v<View, ID3D11DepthStencilView>) {
+        D3D11_DEPTH_STENCIL_VIEW_DESC desc {};
+        view->GetDesc(&desc);
+        out << '~' << static_cast<unsigned>(desc.Format);
+    }
+    return out.str();
 }
 
 template <typename View, size_t N>
@@ -97,6 +141,8 @@ void Record(ID3D11DeviceContext* context, const char* operation) {
     out << ';';
     AppendViews(out, uavs);
     std::lock_guard lock(trace_mutex);
+    if (pixel_shader) used_pixel_shaders.insert(pixel_shader.Get());
+    if (compute_shader) used_compute_shaders.insert(compute_shader.Get());
     ++event_count;
     if (events.size() == max_events) events.pop_front();
     events.emplace_back(out.str());
@@ -122,6 +168,46 @@ void WINAPI HookDispatch(ID3D11DeviceContext* context, UINT x, UINT y, UINT z) {
     Record(context, "CSDispatch");
     original_dispatch(context, x, y, z);
 }
+HRESULT WINAPI HookCreatePixelShader(ID3D11Device* device, const void* bytecode,
+                                     SIZE_T bytecode_size, ID3D11ClassLinkage* linkage,
+                                     ID3D11PixelShader** shader) {
+    const HRESULT result = original_create_pixel_shader(device, bytecode,
+                                                         bytecode_size, linkage, shader);
+    if (SUCCEEDED(result) && shader && *shader && bytecode && bytecode_size) {
+        std::lock_guard lock(trace_mutex);
+        const auto existing = pixel_shader_code.find(*shader);
+        const size_t old_size = existing == pixel_shader_code.end() ? 0 :
+                                existing->second.size();
+        if (bytecode_size <= max_shader_bytes - (stored_shader_bytes - old_size)) {
+            auto& code = pixel_shader_code[*shader];
+            stored_shader_bytes -= code.size();
+            code.assign(static_cast<const uint8_t*>(bytecode),
+                        static_cast<const uint8_t*>(bytecode) + bytecode_size);
+            stored_shader_bytes += code.size();
+        }
+    }
+    return result;
+}
+HRESULT WINAPI HookCreateComputeShader(ID3D11Device* device, const void* bytecode,
+                                       SIZE_T bytecode_size, ID3D11ClassLinkage* linkage,
+                                       ID3D11ComputeShader** shader) {
+    const HRESULT result = original_create_compute_shader(device, bytecode,
+                                                           bytecode_size, linkage, shader);
+    if (SUCCEEDED(result) && shader && *shader && bytecode && bytecode_size) {
+        std::lock_guard lock(trace_mutex);
+        const auto existing = compute_shader_code.find(*shader);
+        const size_t old_size = existing == compute_shader_code.end() ? 0 :
+                                existing->second.size();
+        if (bytecode_size <= max_shader_bytes - (stored_shader_bytes - old_size)) {
+            auto& code = compute_shader_code[*shader];
+            stored_shader_bytes -= code.size();
+            code.assign(static_cast<const uint8_t*>(bytecode),
+                        static_cast<const uint8_t*>(bytecode) + bytecode_size);
+            stored_shader_bytes += code.size();
+        }
+    }
+    return result;
+}
 }
 
 void Install(ID3D11Device* device) {
@@ -139,6 +225,11 @@ void Install(ID3D11Device* device) {
     original_draw_instanced = reinterpret_cast<DrawInstancedFn>(vtable[21]);
     // ID3D11DeviceContext slot 37 is SOSetTargets; Dispatch is slot 41.
     original_dispatch = reinterpret_cast<DispatchFn>(vtable[41]);
+    void** device_vtable = *reinterpret_cast<void***>(device);
+    original_create_pixel_shader =
+        reinterpret_cast<CreatePixelShaderFn>(device_vtable[15]);
+    original_create_compute_shader =
+        reinterpret_cast<CreateComputeShaderFn>(device_vtable[18]);
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(reinterpret_cast<PVOID*>(&original_draw_indexed), HookDrawIndexed);
@@ -146,6 +237,8 @@ void Install(ID3D11Device* device) {
     DetourAttach(reinterpret_cast<PVOID*>(&original_draw_indexed_instanced), HookDrawIndexedInstanced);
     DetourAttach(reinterpret_cast<PVOID*>(&original_draw_instanced), HookDrawInstanced);
     DetourAttach(reinterpret_cast<PVOID*>(&original_dispatch), HookDispatch);
+    DetourAttach(reinterpret_cast<PVOID*>(&original_create_pixel_shader), HookCreatePixelShader);
+    DetourAttach(reinterpret_cast<PVOID*>(&original_create_compute_shader), HookCreateComputeShader);
     const LONG result = DetourTransactionCommit();
     if (result != NO_ERROR) {
         LOG_ERROR("D3D11 frame trace hook failed: {}", result);
@@ -154,6 +247,8 @@ void Install(ID3D11Device* device) {
         original_draw_indexed_instanced = nullptr;
         original_draw_instanced = nullptr;
         original_dispatch = nullptr;
+        original_create_pixel_shader = nullptr;
+        original_create_compute_shader = nullptr;
         return;
     }
     LOG_INFO("D3D11 frame trace hooks installed; waiting for capture marker");
@@ -189,9 +284,52 @@ void BeforePresent(IDXGISwapChain*, ID3D11Device* device) {
     std::lock_guard lock(trace_mutex);
     uint64_t sequence = event_count - events.size();
     for (const auto& event : events) file << ++sequence << ';' << event << '\n';
+    const auto shader_dir = Util::DllPath().parent_path() / "OptiScaler.d3d11trace.shaders";
+    std::error_code error;
+    std::filesystem::create_directories(shader_dir, error);
+    size_t dumped_shaders = 0;
+    if (!error) {
+        for (auto* shader : used_pixel_shaders) {
+            const auto found = pixel_shader_code.find(shader);
+            if (found == pixel_shader_code.end()) continue;
+            std::ostringstream name;
+            name << "ps_" << shader;
+            const auto base = shader_dir / name.str();
+            std::ofstream bytecode(base.string() + ".cso", std::ios::binary | std::ios::trunc);
+            bytecode.write(reinterpret_cast<const char*>(found->second.data()),
+                           found->second.size());
+            Microsoft::WRL::ComPtr<ID3DBlob> disassembly;
+            if (SUCCEEDED(D3DDisassemble(found->second.data(), found->second.size(),
+                                         0, nullptr, &disassembly))) {
+                std::ofstream assembly(base.string() + ".asm", std::ios::binary | std::ios::trunc);
+                assembly.write(static_cast<const char*>(disassembly->GetBufferPointer()),
+                               disassembly->GetBufferSize());
+            }
+            ++dumped_shaders;
+        }
+        for (auto* shader : used_compute_shaders) {
+            const auto found = compute_shader_code.find(shader);
+            if (found == compute_shader_code.end()) continue;
+            std::ostringstream name;
+            name << "cs_" << shader;
+            const auto base = shader_dir / name.str();
+            std::ofstream bytecode(base.string() + ".cso", std::ios::binary | std::ios::trunc);
+            bytecode.write(reinterpret_cast<const char*>(found->second.data()),
+                           found->second.size());
+            ComPtr<ID3DBlob> disassembly;
+            if (SUCCEEDED(D3DDisassemble(found->second.data(), found->second.size(),
+                                         0, nullptr, &disassembly))) {
+                std::ofstream assembly(base.string() + ".asm", std::ios::binary | std::ios::trunc);
+                assembly.write(static_cast<const char*>(disassembly->GetBufferPointer()),
+                               disassembly->GetBufferSize());
+            }
+            ++dumped_shaders;
+        }
+    }
     LOG_INFO("D3D11 frame trace: {} events, last {} saved to {}",
              event_count, events.size(), path.string());
-    std::error_code error;
+    LOG_INFO("D3D11 frame trace: {} pixel/compute shaders dumped to {}",
+             dumped_shaders, shader_dir.string());
     std::filesystem::remove(Util::DllPath().parent_path() /
                             "OptiScaler.d3d11trace.capture", error);
     std::filesystem::remove(Util::DllPath().parent_path() /
@@ -208,9 +346,18 @@ void Uninstall() {
     DetourDetach(reinterpret_cast<PVOID*>(&original_draw_indexed_instanced), HookDrawIndexedInstanced);
     DetourDetach(reinterpret_cast<PVOID*>(&original_draw_instanced), HookDrawInstanced);
     DetourDetach(reinterpret_cast<PVOID*>(&original_dispatch), HookDispatch);
+    DetourDetach(reinterpret_cast<PVOID*>(&original_create_pixel_shader), HookCreatePixelShader);
+    DetourDetach(reinterpret_cast<PVOID*>(&original_create_compute_shader), HookCreateComputeShader);
     DetourTransactionCommit();
     original_draw = nullptr;
+    original_create_pixel_shader = nullptr;
+    original_create_compute_shader = nullptr;
     traced_device = nullptr;
     traced_context = nullptr;
+    pixel_shader_code.clear();
+    compute_shader_code.clear();
+    used_pixel_shaders.clear();
+    used_compute_shaders.clear();
+    stored_shader_bytes = 0;
 }
 }

@@ -299,6 +299,15 @@ ComPtr<ID3D11Device> g_pre_xess_subrect_device;
 std::atomic<bool> g_running {false};
 std::atomic<double> g_last_ms {0.0};
 std::string g_failure_reason;
+struct PreXeSSPresent {
+    ComPtr<ID3D11Device> device;
+    UINT width = 0;
+    UINT height = 0;
+    std::chrono::steady_clock::time_point submitted {};
+    bool pending = false;
+};
+// Protected by g_session_mutex, the same lock used by BeforePresent.
+PreXeSSPresent g_pre_xess_present;
 }
 
 bool IsSupportedGame() {
@@ -331,9 +340,33 @@ void BeforePresent(IDXGISwapChain* swapchain, ID3D11Device* device) {
             LOG_INFO("D3D11 Present SYCL NR disabled: released model session and shared textures");
         }
         g_session.failed = false;
+        g_pre_xess_present = {};
         g_failure_reason.clear();
         g_running = false;
         return;
+    }
+    if (g_pre_xess_present.pending) {
+        // Another swapchain can present first. Match the XeSS output size and
+        // device before consuming this frame's pre-upscale SNR marker.
+        ComPtr<ID3D11Texture2D> backbuffer;
+        D3D11_TEXTURE2D_DESC desc {};
+        if (SUCCEEDED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))))
+            backbuffer->GetDesc(&desc);
+        const bool matches = device == g_pre_xess_present.device.Get() &&
+            desc.Width == g_pre_xess_present.width &&
+            desc.Height == g_pre_xess_present.height;
+        if (matches) {
+            if (g_session.device11) {
+                std::lock_guard<std::mutex> interop_lock(g_interop_mutex);
+                g_session.Release();
+            }
+            g_pre_xess_present.pending = false;
+            g_running = true;
+            return;
+        }
+        if (std::chrono::steady_clock::now() - g_pre_xess_present.submitted >
+            std::chrono::milliseconds(250))
+            g_pre_xess_present = {};
     }
     if (g_session.failed) return;
     const auto started = std::chrono::steady_clock::now();
@@ -369,8 +402,24 @@ void RetryAfterFailure() {
     std::lock_guard<std::mutex> interop_lock(g_interop_mutex);
     g_session.Release();
     g_session.failed = false;
+    g_pre_xess_present = {};
     g_failure_reason.clear();
     g_running = false;
+}
+void MarkPreXeSSOutput(ID3D11DeviceContext* context, ID3D11Resource* output) {
+    if (!IsSupportedGame() || !context || !output) return;
+    ComPtr<ID3D11Texture2D> texture;
+    if (FAILED(output->QueryInterface(IID_PPV_ARGS(&texture)))) return;
+    D3D11_TEXTURE2D_DESC desc {};
+    texture->GetDesc(&desc);
+    ComPtr<ID3D11Device> device;
+    context->GetDevice(&device);
+    std::lock_guard<std::mutex> lock(g_session_mutex);
+    g_pre_xess_present.device = std::move(device);
+    g_pre_xess_present.width = desc.Width;
+    g_pre_xess_present.height = desc.Height;
+    g_pre_xess_present.submitted = std::chrono::steady_clock::now();
+    g_pre_xess_present.pending = true;
 }
 
 bool ProcessBeforeXeSS(ID3D11DeviceContext* context,

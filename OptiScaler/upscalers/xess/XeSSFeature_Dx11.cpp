@@ -434,6 +434,7 @@ bool XeSSFeature_Dx11::EvaluateInternal(ID3D11DeviceContext* DeviceContext, NVSD
     // Run SNR at that input resolution, then give its separate GPU texture
     // to XeSS. The game-owned color and velocity resources are untouched.
     Microsoft::WRL::ComPtr<ID3D11Texture2D> nrColor;
+    bool preNrUsed = false;
     if (Config::Instance()->DlssNrBackend.value_or_default() == 1)
     {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> colorTexture;
@@ -461,6 +462,7 @@ bool XeSSFeature_Dx11::EvaluateInternal(ID3D11DeviceContext* DeviceContext, NVSD
                 params.pColorTexture = nrColor.Get();
                 params.inputColorBase.x = 0;
                 params.inputColorBase.y = 0;
+                preNrUsed = true;
                 _preNrWarningLogged = false;
             }
             else if (!nrError.empty() && !_preNrWarningLogged)
@@ -479,6 +481,9 @@ bool XeSSFeature_Dx11::EvaluateInternal(ID3D11DeviceContext* DeviceContext, NVSD
         LOG_ERROR("D3D11Execute error: {0}", ResultToString(xessResult));
         return false;
     }
+
+    if (preNrUsed)
+        ValheimNr_Dx11::MarkPreXeSSOutput(DeviceContext, params.pOutputTexture);
 
     return true;
 }

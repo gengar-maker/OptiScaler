@@ -31,4 +31,8 @@ bool ProcessBeforeXeSS(ID3D11DeviceContext* context,
                        bool reset_history,
                        Microsoft::WRL::ComPtr<ID3D11Texture2D>& result,
                        std::string& error);
+
+// Called only after XeSS consumed the SNR texture successfully. Prevents the
+// final-frame fallback from running the model a second time on that frame.
+void MarkPreXeSSOutput(ID3D11DeviceContext* context, ID3D11Resource* output);
 }
