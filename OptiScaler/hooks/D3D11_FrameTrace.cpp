@@ -50,10 +50,13 @@ uint64_t event_count = 0;
 constexpr size_t max_events = 4096;
 constexpr size_t max_shader_bytes = 64 * 1024 * 1024;
 constexpr uint64_t tekken_taa_shader_fnv = 0xfb8a6b0e8667f10dull;
+constexpr uint64_t tekken_taa_gameplay_shader_fnv[] = {
+    0x0d3ff3622d0f27f1ull, 0x0bbef44d7962be96ull};
 constexpr uint64_t tekken_battle_post_shader_fnv = 0xfaed6ba8cf89dc98ull;
 bool taa_inputs_dumped = false;
 std::atomic<bool> taa_input_capture_pending {false};
 std::atomic<ID3D11PixelShader*> tekken_taa_shader {nullptr};
+std::atomic<ID3D11PixelShader*> tekken_taa_gameplay_shaders[2] {};
 thread_local bool taa_output_after_draw = false;
 bool battle_inputs_dumped = false;
 std::atomic<bool> battle_capture_pending {false};
@@ -313,7 +316,9 @@ void Record(ID3D11DeviceContext* context, const char* operation) {
         context->PSGetShader(&shader, nullptr, nullptr);
         const bool taa = shader &&
             taa_input_capture_pending.load(std::memory_order_acquire) &&
-            shader.Get() == tekken_taa_shader.load(std::memory_order_acquire);
+            (shader.Get() == tekken_taa_shader.load(std::memory_order_acquire) ||
+             shader.Get() == tekken_taa_gameplay_shaders[0].load(std::memory_order_acquire) ||
+             shader.Get() == tekken_taa_gameplay_shaders[1].load(std::memory_order_acquire));
         const bool battle = shader &&
             battle_capture_pending.load(std::memory_order_acquire) &&
             shader.Get() == tekken_battle_post_shader.load(std::memory_order_acquire);
@@ -401,6 +406,16 @@ HRESULT WINAPI HookCreatePixelShader(ID3D11Device* device, const void* bytecode,
                 static_cast<const uint8_t*>(bytecode) + bytecode_size);
             if (ShaderHash(candidate) == tekken_taa_shader_fnv)
                 tekken_taa_shader.store(*shader, std::memory_order_release);
+        }
+        if (bytecode_size == 6348) {
+            std::vector<uint8_t> candidate(
+                static_cast<const uint8_t*>(bytecode),
+                static_cast<const uint8_t*>(bytecode) + bytecode_size);
+            const auto hash = ShaderHash(candidate);
+            for (size_t i = 0; i < 2; ++i)
+                if (hash == tekken_taa_gameplay_shader_fnv[i])
+                    tekken_taa_gameplay_shaders[i].store(
+                        *shader, std::memory_order_release);
         }
         if (bytecode_size == 1576) {
             std::vector<uint8_t> candidate(
@@ -518,20 +533,20 @@ void BeforePresent(IDXGISwapChain* swapchain, ID3D11Device* device) {
                     "OptiScaler.d3d11trace.battle.present");
         }
     }
-    if (!battle_inputs_dumped &&
-        !battle_capture_pending.load(std::memory_order_acquire)) {
+    if (!battle_capture_pending.load(std::memory_order_acquire)) {
         std::error_code arm_error;
         if (std::filesystem::exists(Util::DllPath().parent_path() /
                                     "OptiScaler.d3d11trace.battle.arm", arm_error)) {
+            battle_inputs_dumped = false;
             battle_capture_pending.store(true, std::memory_order_release);
             LOG_INFO("D3D11 battle HDR/depth capture armed");
         }
     }
-    if (!taa_inputs_dumped &&
-        !taa_input_capture_pending.load(std::memory_order_acquire)) {
+    if (!taa_input_capture_pending.load(std::memory_order_acquire)) {
         std::error_code arm_error;
         if (std::filesystem::exists(Util::DllPath().parent_path() /
                                     "OptiScaler.d3d11trace.inputs.arm", arm_error)) {
+            taa_inputs_dumped = false;
             taa_input_capture_pending.store(true, std::memory_order_release);
             LOG_INFO("D3D11 TAA input capture armed for the next full-size pass");
         }
@@ -613,6 +628,8 @@ void Uninstall() {
     capturing.store(false, std::memory_order_release);
     taa_input_capture_pending.store(false, std::memory_order_release);
     tekken_taa_shader.store(nullptr, std::memory_order_release);
+    for (auto& shader : tekken_taa_gameplay_shaders)
+        shader.store(nullptr, std::memory_order_release);
     battle_capture_pending.store(false, std::memory_order_release);
     tekken_battle_post_shader.store(nullptr, std::memory_order_release);
     battle_present_pending.store(false, std::memory_order_release);

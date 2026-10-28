@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -44,10 +45,22 @@ static void Wait(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64 value) {
 }
 int main(int argc, char** argv) {
     try {
-        if (argc != 5 && argc != 7 && argc != 8) throw std::runtime_error("usage: arc_nr_sycl_provider_gpu_smoke LOGICAL DERIVED INPUT OUTPUT [WIDTH HEIGHT [--temporal|--temporal-shift|--temporal-shift4|--motion-file=PATH|--estimate|--estimate-shift4|--rgba8|--rgb10a2]]");
-        const std::string mode = argc == 8 ? argv[7] : "";
+        if (argc != 5 && argc != 7 && argc != 8 && argc != 9 && argc != 10) throw std::runtime_error("usage: arc_nr_sycl_provider_gpu_smoke LOGICAL DERIVED INPUT OUTPUT [WIDTH HEIGHT [--temporal|--temporal-shift|--temporal-shift4|--motion-file=PATH|--estimate|--estimate-shift4|--rgba8|--rgb10a2] [PREVIOUS_COLOR [--colour-strength=VALUE]]]");
+        const std::string mode = argc >= 8 ? argv[7] : "";
         const bool motion_file = mode.starts_with("--motion-file=");
-        const bool temporal = argc == 8 &&
+        const bool previous_file = argc >= 9;
+        if (previous_file && !motion_file)
+            throw std::runtime_error("previous color requires a motion file");
+        const std::string colour_option = argc == 10 ? argv[9] : "";
+        if (argc == 10 && !colour_option.starts_with("--colour-strength="))
+            throw std::runtime_error("expected --colour-strength=VALUE");
+        const float colour_strength = argc == 10
+            ? std::stof(colour_option.substr(sizeof("--colour-strength=") - 1))
+            : 1.0f;
+        if (!std::isfinite(colour_strength) || colour_strength < 0.0f ||
+            colour_strength > 4095.0f / 1024.0f)
+            throw std::runtime_error("colour strength out of range");
+        const bool temporal = argc >= 8 &&
             (mode == "--temporal" || mode == "--temporal-shift" ||
              mode == "--temporal-shift4" || motion_file);
         const bool shift = mode == "--temporal-shift";
@@ -63,6 +76,17 @@ int main(int argc, char** argv) {
         std::ifstream file(argv[3], std::ios::binary);
         std::vector<char> color(bytes);
         if (!file.read(color.data(), bytes)) throw std::runtime_error("input read failed");
+        std::vector<char> previous_color;
+        if (previous_file) {
+            previous_color.resize(bytes);
+            std::ifstream previous(argv[8], std::ios::binary | std::ios::ate);
+            if (!previous || previous.tellg() !=
+                static_cast<std::streamoff>(bytes))
+                throw std::runtime_error("previous color has wrong size");
+            previous.seekg(0);
+            if (!previous.read(previous_color.data(), bytes))
+                throw std::runtime_error("previous color read failed");
+        }
         ComPtr<IDXGIFactory6> factory;
         Check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "factory");
         ComPtr<IDXGIAdapter1> adapter;
@@ -116,7 +140,8 @@ int main(int argc, char** argv) {
         D3D12_HEAP_PROPERTIES readback_heap = upload_heap;
         readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
         auto plain_desc = Buffer(bytes, D3D12_RESOURCE_FLAG_NONE);
-        ComPtr<ID3D12Resource> upload, shifted_upload, readback, motion_upload;
+        ComPtr<ID3D12Resource> upload, shifted_upload, previous_upload,
+            readback, motion_upload;
         Check(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &plain_desc,
               D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)), "upload");
         Check(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &plain_desc,
@@ -152,6 +177,14 @@ int main(int argc, char** argv) {
         Check(upload->Map(0, &no_read, &mapped), "upload Map");
         memcpy(mapped, color.data(), bytes);
         upload->Unmap(0, nullptr);
+        if (previous_file) {
+            Check(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE,
+                  &plain_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                  IID_PPV_ARGS(&previous_upload)), "previous upload");
+            Check(previous_upload->Map(0, &no_read, &mapped), "previous Map");
+            memcpy(mapped, previous_color.data(), bytes);
+            previous_upload->Unmap(0, nullptr);
+        }
         if (shift4) {
             if (rgba8 || rgb10a2) throw std::runtime_error("shift4 requires RGBA16F");
             Check(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE,
@@ -177,7 +210,9 @@ int main(int argc, char** argv) {
         Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, allocator.Get(), nullptr,
                                         IID_PPV_ARGS(&list)), "list");
         Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "fence");
-        list->CopyBufferRegion(input->buffer.Get(), 0, upload.Get(), 0, bytes);
+        list->CopyBufferRegion(input->buffer.Get(), 0,
+                               previous_file ? previous_upload.Get() : upload.Get(),
+                               0, bytes);
         if (temporal)
             list->CopyBufferRegion(motion->buffer.Get(), 0,
                                    motion_upload.Get(), 0, bytes);
@@ -204,6 +239,12 @@ int main(int argc, char** argv) {
         frame.controls.struct_size = sizeof(frame.controls);
         frame.controls.reset_history = 1;
         frame.controls.reserved = estimate ? 1u : 0u;
+        if (argc == 10) {
+            const auto colour_q10 = static_cast<uint32_t>(
+                std::lround(colour_strength * 1024.0f));
+            frame.controls.reserved |= 2u | (colour_q10 << 8) |
+                                       (1024u << 20);
+        }
         frame.controls.local_tone = 1;
         frame.controls.local_structure = 1;
         frame.controls.skin_structure = -1;
@@ -229,12 +270,16 @@ int main(int argc, char** argv) {
         ArcNrSyclGpuTimings timings{};
         frame.timings = &timings;
         ArcNrSyclStatus status = ARC_NR_SYCL_OK;
-        for (int i = 0; i < (shift4 ? 2 : 4) && status == ARC_NR_SYCL_OK; ++i) {
-            if (shift4 && i == 1) {
+        const bool alternate_input = shift4 || previous_file;
+        for (int i = 0; i < (alternate_input ? 2 : 4) &&
+                        status == ARC_NR_SYCL_OK; ++i) {
+            if (alternate_input && i == 1) {
                 Check(allocator->Reset(), "shift allocator reset");
                 Check(list->Reset(allocator.Get(), nullptr), "shift list reset");
                 list->CopyBufferRegion(input->buffer.Get(), 0,
-                                       shifted_upload.Get(), 0, bytes);
+                                       previous_file ? upload.Get() :
+                                           shifted_upload.Get(),
+                                       0, bytes);
                 Check(list->Close(), "shift close");
                 queue->ExecuteCommandLists(1, lists);
                 Wait(queue.Get(), fence.Get(), 3);
@@ -265,7 +310,7 @@ int main(int argc, char** argv) {
         list->CopyBufferRegion(readback.Get(), 0, output->buffer.Get(), 0, bytes);
         Check(list->Close(), "output close");
         queue->ExecuteCommandLists(1, lists);
-        Wait(queue.Get(), fence.Get(), shift4 ? 4 : 2);
+        Wait(queue.Get(), fence.Get(), alternate_input ? 4 : 2);
         D3D12_RANGE range{0,bytes};
         Check(readback->Map(0, &range, &mapped), "readback Map");
         std::ofstream out(argv[4], std::ios::binary);
