@@ -1,4 +1,6 @@
 #include "pch.h"
+#include "XeSS_Native_Dx12.h"
+#include <proxies/XeSS_Proxy.h>
 #include "XeSS_Common.h"
 #include "XeSS_Base.h"
 
@@ -71,6 +73,11 @@ static std::optional<float> GetQualityOverrideRatio(const xess_quality_settings_
 
 xess_result_t hk_xessGetVersion(xess_version_t* pVersion)
 {
+    if (XeSSNativeDx12::Enabled()) {
+        auto fn = XeSSProxy::GameRuntime().xessGetVersion;
+        return fn ? fn(pVersion) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("");
 
     pVersion->major = XeSSProxy::Version().major;
@@ -95,6 +102,11 @@ xess_result_t hk_xessGetVersionDx11(xess_version_t* pVersion)
 
 xess_result_t hk_xessIsOptimalDriver(xess_context_handle_t hContext)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessIsOptimalDriver;
+        return fn ? fn(hContext) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("");
     return XESS_RESULT_SUCCESS;
 }
@@ -102,6 +114,11 @@ xess_result_t hk_xessIsOptimalDriver(xess_context_handle_t hContext)
 xess_result_t hk_xessSetLoggingCallback(xess_context_handle_t hContext, xess_logging_level_t loggingLevel,
                                         xess_app_log_callback_t loggingCallback)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessSetLoggingCallback;
+        return fn ? fn(hContext, loggingLevel, loggingCallback) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("");
     return XESS_RESULT_SUCCESS;
 }
@@ -109,6 +126,11 @@ xess_result_t hk_xessSetLoggingCallback(xess_context_handle_t hContext, xess_log
 xess_result_t hk_xessGetProperties(xess_context_handle_t hContext, const xess_2d_t* pOutputResolution,
                                    xess_properties_t* pBindingProperties)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessGetProperties;
+        return fn ? fn(hContext, pOutputResolution, pBindingProperties) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("");
     *pBindingProperties = {};
     (*pBindingProperties).requiredDescriptorCount = 1;
@@ -121,6 +143,8 @@ xess_result_t hk_xessGetProperties(xess_context_handle_t hContext, const xess_2d
 
 xess_result_t hk_xessDestroyContext(xess_context_handle_t hContext)
 {
+    if (XeSSNativeDx12::Owns(hContext)) return XeSSNativeDx12::Destroy(hContext);
+
     LOG_DEBUG("hContext: {}", (size_t) hContext);
 
     if (!_contexts.contains(hContext))
@@ -152,6 +176,11 @@ xess_result_t hk_xessDestroyContext(xess_context_handle_t hContext)
 
 xess_result_t hk_xessSetVelocityScale(xess_context_handle_t hContext, float x, float y)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessSetVelocityScale;
+        return fn ? fn(hContext, x, y) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("hContext: {}, x: {}, y: {}", (size_t) hContext, x, y);
 
     _motionScales[hContext] = { x, y };
@@ -161,6 +190,11 @@ xess_result_t hk_xessSetVelocityScale(xess_context_handle_t hContext, float x, f
 
 xess_result_t hk_xessForceLegacyScaleFactors(xess_context_handle_t hContext, bool force)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessForceLegacyScaleFactors;
+        return fn ? fn(hContext, force) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("");
 
     return XESS_RESULT_SUCCESS;
@@ -168,6 +202,11 @@ xess_result_t hk_xessForceLegacyScaleFactors(xess_context_handle_t hContext, boo
 
 xess_result_t hk_xessGetExposureMultiplier(xess_context_handle_t hContext, float* pScale)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessGetExposureMultiplier;
+        return fn ? fn(hContext, pScale) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("");
 
     if (!_nvParams.contains(hContext))
@@ -182,6 +221,11 @@ xess_result_t hk_xessGetExposureMultiplier(xess_context_handle_t hContext, float
 xess_result_t hk_xessGetInputResolution(xess_context_handle_t hContext, const xess_2d_t* pOutputResolution,
                                         xess_quality_settings_t qualitySettings, xess_2d_t* pInputResolution)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessGetInputResolution;
+        return fn ? fn(hContext, pOutputResolution, qualitySettings, pInputResolution) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("");
 
     unsigned int OutWidth;
@@ -263,6 +307,11 @@ xess_result_t hk_xessGetInputResolution(xess_context_handle_t hContext, const xe
 
 xess_result_t hk_xessGetIntelXeFXVersion(xess_context_handle_t hContext, xess_version_t* pVersion)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessGetIntelXeFXVersion;
+        return fn ? fn(hContext, pVersion) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("");
 
     pVersion->major = 2;
@@ -275,6 +324,11 @@ xess_result_t hk_xessGetIntelXeFXVersion(xess_context_handle_t hContext, xess_ve
 
 xess_result_t hk_xessGetJitterScale(xess_context_handle_t hContext, float* pX, float* pY)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessGetJitterScale;
+        return fn ? fn(hContext, pX, pY) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("");
 
     if (!_jitterScales.contains(hContext))
@@ -293,6 +347,11 @@ xess_result_t hk_xessGetOptimalInputResolution(xess_context_handle_t hContext, c
                                                xess_2d_t* pInputResolutionOptimal, xess_2d_t* pInputResolutionMin,
                                                xess_2d_t* pInputResolutionMax)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessGetOptimalInputResolution;
+        return fn ? fn(hContext, pOutputResolution, qualitySettings, pInputResolutionOptimal, pInputResolutionMin, pInputResolutionMax) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("pOutputResolution: {}x{}", pOutputResolution->x, pOutputResolution->y);
 
     unsigned int OutWidth;
@@ -379,6 +438,11 @@ xess_result_t hk_xessGetOptimalInputResolution(xess_context_handle_t hContext, c
 
 xess_result_t hk_xessGetVelocityScale(xess_context_handle_t hContext, float* pX, float* pY)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessGetVelocityScale;
+        return fn ? fn(hContext, pX, pY) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("");
 
     if (!_motionScales.contains(hContext))
@@ -394,6 +458,11 @@ xess_result_t hk_xessGetVelocityScale(xess_context_handle_t hContext, float* pX,
 
 xess_result_t hk_xessSetJitterScale(xess_context_handle_t hContext, float x, float y)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessSetJitterScale;
+        return fn ? fn(hContext, x, y) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("x: {}, y: {}", x, y);
 
     _jitterScales[hContext] = { x, y };
@@ -403,6 +472,11 @@ xess_result_t hk_xessSetJitterScale(xess_context_handle_t hContext, float x, flo
 
 xess_result_t hk_xessSetExposureMultiplier(xess_context_handle_t hContext, float scale)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessSetExposureMultiplier;
+        return fn ? fn(hContext, scale) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("");
 
     if (!_nvParams.contains(hContext))
@@ -433,6 +507,11 @@ xess_result_t hk_xessAILGetVersion()
 
 xess_result_t hk_xessGetPipelineBuildStatus(xess_context_handle_t hContext)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessGetPipelineBuildStatus;
+        return fn ? fn(hContext) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("");
     return XESS_RESULT_SUCCESS;
 }

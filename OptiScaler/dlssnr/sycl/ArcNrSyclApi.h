@@ -44,6 +44,9 @@ typedef struct ArcNrSyclFrame {
     // caller motion texture is available. Bit 1: apply colour and transfer
     // strengths packed as unsigned Q10 values in bits 8..19 and 20..31.
     // An unset bit 1 keeps both strengths at 1 for older callers.
+    // Bit 2: preserve source base tone by transferring the high-frequency edit
+    // in normalized display/proxy RGB. HDR callers must supply their encoded
+    // proxy, keep both strengths at 1 here, then restore HDR externally.
     uint32_t reserved;
     // Exactly width*height*4 FP16 values, tightly packed RGBA. Colour is
     // normalized before model feature construction. Output is normalized

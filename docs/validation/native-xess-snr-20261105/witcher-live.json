@@ -1,0 +1,30 @@
+{
+  "observedAt": "2026-11-05T22:15:40.163697+03:00",
+  "candidate": "327B6B9E9705A2902C95A794708EC55DEC51701EFFDD602D82ED0A43B14A24CB",
+  "init": [
+    "22:14:08.961515: output=1920x1080 quality=103 flags=0x52"
+  ],
+  "fullModel": "neural=true apply=true temporal=1",
+  "timings": {
+    "1130x636": {
+      "samples": 30,
+      "first": "22:14:34.413361",
+      "last": "22:15:36.432575",
+      "pass_median_ms": 15.781,
+      "model_median_ms": 13.486,
+      "gpu_median_ms": {
+        "fallback": 0.0145,
+        "encode": 0.029,
+        "inputCopy": 0.043,
+        "outputCopy": 0.02,
+        "resolve": 0.0455
+      }
+    }
+  },
+  "integrationErrors": [],
+  "visualConfirmation": "User: все отработало, я уже выключил",
+  "scope": "Periodic warmed live samples; SNR processor only, excludes XeSS and game rendering; scene conditions may differ from previous live run",
+  "liveValidation": "User confirmed successful optimized game test and closed the game",
+  "userConfirmedAt": "2026-11-05T22:30:25.025105+03:00",
+  "timingEvidence": "Recorded 22:15:40 from process 13024. Game log was replaced by a subsequent startup at 22:30; live-optimized.log now contains that later startup, not the measured session. Summary values retained from the earlier report."
+}

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "SysUtils.h"
 #include "State.h"
@@ -264,6 +264,8 @@ class Config
     CustomOptional<bool> DlssNrEstimateMotion { false };
     // Native D3D12: dispatch on an OptiScaler-owned list immediately after the
     // game's upscaler list is submitted. Requires a verified list boundary.
+    // Preserve the game's real XeSS context and complete SDK contract.
+    CustomOptional<bool> DlssNrNativeXeSS { false };
     CustomOptional<bool> DlssNrNativeAfterSubmit { false };
     CustomOptional<int32_t, NoDefault> DlssNrNativeOutputState;
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
@@ -284,6 +286,8 @@ class Config
     // exaggerating an edit is the only honest way to see whether there is one.
     CustomOptional<float> DlssNrTransferStrength { 1.0f };
     CustomOptional<float> DlssNrColourStrength { 1.0f };
+    // Opt-in D3D11 display/proxy presentation policy; raw recurrent history stays intact.
+    CustomOptional<bool> DlssNrPreserveBaseTone { false };
 
     // The RenoDX reversible proxy mode. 0 = today's soft-knee encode + our composition (default,
     // byte-identical); 1 = unclipped Neutwo proxy + our composition; 2 = Neutwo proxy + pure-inverse

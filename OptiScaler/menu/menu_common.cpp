@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "menu_common.h"
 #include <dlssnr/DlssNr_ExposureScan.h>
 
@@ -6,6 +6,8 @@
 #include <cfloat>
 
 #include <dlssnr/DlssNr.h>
+#include <dlssnr/sycl/ValheimNr_Dx11.h>
+#include <inputs/XeSS_Nr_Dx12.h>
 
 #include "input/input_system.h"
 
@@ -1220,6 +1222,7 @@ struct MenuCommon::RenderMenuContext
 
     bool frameTimesCalculated = false;
     bool newFrame = false;
+    ValheimNr_Dx11::PreparationStatus nrPreparation;
 
     VersionCheckStatus versionStatus;
     std::string currentVersionText;
@@ -1476,7 +1479,9 @@ void MenuCommon::BeginMenuFrameIfNeeded(RenderMenuContext& ctx)
     const bool scanIndicator = config->DlssNrScanMeter.value_or_default() &&
                                DlssNr::ExposureScan::Where() != DlssNr::ExposureScan::Verdict::Off;
 
-    if ((!config->DisableSplash.value_or_default() && now > splashStart && now < splashLimit) ||
+    const bool preparingSnr = config->DlssNrEnabled.value_or_default() &&
+        ctx.nrPreparation.visible;
+    if (preparingSnr || (!config->DisableSplash.value_or_default() && now > splashStart && now < splashLimit) ||
         config->ShowFps.value_or_default() || _isVisible || ImGui::notifications.size() > 0 || scanIndicator ||
         (config->DlssNrCompare.value_or_default() != 0 && config->DlssNrCompareTags.value_or_default()))
     {
@@ -7078,7 +7083,10 @@ void MenuCommon::RenderMainMenuGraphs(RenderMenuContext& ctx)
                     }
 
                     std::optional<double> nrTime {};
-                    nrTime = DlssNr::LastGpuTime();
+                    nrTime = ValheimNr_Dx11::IsRunning() ? ValheimNr_Dx11::LastFrameMs()
+                                                       : DlssNr::LastGpuTime();
+                    if (const auto nativeNr = XeSSNrNative::GetStatus(); nativeNr.running)
+                        nrTime = nativeNr.frameMs;
                     if (hasExtra || nrTime.has_value())
                     {
                         ImGui::TableNextRow();
@@ -7707,6 +7715,10 @@ bool MenuCommon::RenderMenu()
     RenderMenuContext ctx { State::Instance(), Config::Instance(), ImGui::GetIO() };
     ctx.now = Util::MillisecondsNow();
     ctx.currentFeature = ctx.state.currentFeature;
+    ctx.nrPreparation = ValheimNr_Dx11::GetPreparationStatus();
+    if (const auto nativeNr = XeSSNrNative::GetStatus(); nativeNr.active)
+        ctx.nrPreparation = {nativeNr.pending, nativeNr.width, nativeNr.height,
+            nativeNr.seconds, nativeNr.message, nativeNr.visible, nativeNr.failed};
 
     // 1) Collect timing and input state before any ImGui drawing.
     UpdateRenderTiming(ctx);
@@ -7728,6 +7740,41 @@ bool MenuCommon::RenderMenu()
 
     // 4) Draw the full settings menu last so popups and child windows keep their existing behavior.
     RenderMainMenuWindow(ctx);
+
+    // Draw above every ImGui window, independent of saved window position,
+    // menu visibility and theme alpha. Keep the completion visible for 6 s,
+    // including after the monitor finishes a fullscreen mode transition.
+    if (ctx.newFrame && ctx.config->DlssNrEnabled.value_or_default() && ctx.nrPreparation.visible) {
+        const auto& preparation = ctx.nrPreparation;
+        const std::string title = StrFmt("OptiScaler: SNR %ux%u - %s", preparation.width,
+            preparation.height, preparation.pending ? "preparing" : preparation.failed ? "failed" : "ready");
+        const std::string footer = StrFmt("%.1f s%s", preparation.seconds,
+            preparation.pending ? " | Original game rendering continues" : "");
+        const std::string message = preparation.failed ?
+            "Preparation failed. Open the NR menu for details and Retry." : preparation.message;
+        const float padding = 14.0f;
+        const float line = ImGui::GetFontSize() + 6.0f;
+        const float boxWidth = std::min(ctx.io.DisplaySize.x - 24.0f,
+            std::max({ImGui::CalcTextSize(title.c_str()).x,
+                      ImGui::CalcTextSize(message.c_str()).x,
+                      ImGui::CalcTextSize(footer.c_str()).x}) + 2 * padding);
+        const ImVec2 pos((ctx.io.DisplaySize.x - boxWidth) * 0.5f, 24.0f);
+        auto* draw = ImGui::GetForegroundDrawList();
+        draw->AddRectFilled(pos, ImVec2(pos.x + boxWidth, pos.y + line * 3 + padding * 2),
+            IM_COL32(12, 16, 24, 245), 8.0f);
+        const auto accent = preparation.pending ? IM_COL32(255, 210, 80, 255) :
+            preparation.failed ? IM_COL32(255, 100, 100, 255) : IM_COL32(100, 255, 160, 255);
+        draw->AddText(ImVec2(pos.x + padding, pos.y + padding), accent, title.c_str());
+        draw->AddText(ImVec2(pos.x + padding, pos.y + padding + line), IM_COL32_WHITE,
+            message.c_str());
+        draw->AddText(ImVec2(pos.x + padding, pos.y + padding + line * 2), IM_COL32_WHITE, footer.c_str());
+        static std::string lastStatus;
+        if (title != lastStatus) {
+            LOG_INFO("SNR preparation overlay drawn: {} (viewport {}x{})", title,
+                ctx.io.DisplaySize.x, ctx.io.DisplaySize.y);
+            lastStatus = title;
+        }
+    }
 
     if (ctx.newFrame)
         ImGui::EndFrame();

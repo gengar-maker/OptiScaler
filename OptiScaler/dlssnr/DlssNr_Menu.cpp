@@ -4,6 +4,7 @@
 #include "DlssNr.h"
 #include "DlssNr_ExposureScan.h"
 #include "sycl/ValheimNr_Dx11.h"
+#include <inputs/XeSS_Nr_Dx12.h>
 
 
 #include <Config.h>
@@ -99,7 +100,8 @@ void RenderMenu(Config* config, float menuResScale)
             HelpMarker("Runs the Intel SYCL neural renderer over the upscaler's output."
                        "\n\nRequires arc_nr_sycl.dll and arc_nr_weights beside OptiScaler."
                        "\nOn native D3D12, the pass runs after the upscaler's command list is submitted."
-                       "\nIn Valheim and Tekken 7 DirectX 11 mode it processes the finished frame at display resolution."
+                       "\nThe opt-in DirectX 11 Present path processes the finished frame at display resolution."
+                       "\nIt includes the game's HUD and uses estimated rather than engine motion vectors."
                        "\nThe Present path can estimate motion from consecutive frames for temporal history.");
         else
             HelpMarker("Synthesises detail in the upscaler's output, before frame generation sees it."
@@ -134,10 +136,12 @@ void RenderMenu(Config* config, float menuResScale)
         // Either backend. The two keep separate state, and on a native Vulkan game the D3D12 side
         // is never touched -- so asking only that one reports "waiting for the upscaler" over a pass
         // that is demonstrably running.
+        const auto nativeNr = XeSSNrNative::GetStatus();
         const bool vulkan = DlssNr::IsRunningVk();
         const bool presentNr = ValheimNr_Dx11::IsRunning();
         const bool presentGame = config->DlssNrBackend.value_or_default() == 1 &&
                                  ValheimNr_Dx11::IsSupportedGame();
+        const auto preparation = ValheimNr_Dx11::GetPreparationStatus();
 
         // The D3D11 Present path releases its model session when disabled, so
         // a stage load gets the GPU memory back. Other backends retain their
@@ -148,6 +152,24 @@ void RenderMenu(Config* config, float menuResScale)
                 ImGui::TextDisabled("Off. The D3D11 model session is released; turning it back on reloads it.");
             else
                 ImGui::TextDisabled("Off. The model stays loaded, so turning this back on is immediate.");
+        }
+        else if (nativeNr.active)
+        {
+            if (nativeNr.running)
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
+                    "SNR %ux%u -> native XeSS: %.2f ms (model %.2f ms)%s",
+                    nativeNr.width, nativeNr.height, nativeNr.frameMs, nativeNr.modelMs,
+                    applyModel ? "" : " - edit hidden");
+            else if (nativeNr.pending)
+                ImGui::Text("Preparing SNR %ux%u - %.1f s", nativeNr.width, nativeNr.height, nativeNr.seconds);
+            ImGui::TextWrapped("%s", nativeNr.message.c_str());
+        }
+        else if (presentGame && preparation.pending)
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                "Preparing SNR %ux%u - %.1f s", preparation.width, preparation.height,
+                preparation.seconds);
+            ImGui::TextWrapped("%s. Original game rendering continues.", preparation.message.c_str());
         }
         else if (!DlssNr::IsRunning() && !vulkan && !presentNr)
         {
@@ -199,11 +221,16 @@ void RenderMenu(Config* config, float menuResScale)
             else
                 ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running.%s", runSuffix);
 
+            if (presentNr)
+                if (const auto model = ValheimNr_Dx11::LastModelMs(); model.has_value())
+                    ImGui::TextDisabled("SNR model: %.2f ms (included above)", model.value());
+
             ImGui::SameLine();
             ImGui::TextDisabled("(?)");
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("The whole pass: the staging copies and the resolve as well as the"
-                                  "\nmodel. Timing only the model would flatter the number."
+                ImGui::SetTooltip("SNR pass: GPU transfers, synchronization and model execution."
+                                  "\nThe D3D11 reading includes waiting for the game's input."
+                                  "\nProfile compilation, XeSS and HDR adaptation are not included."
                                   "\n\nCompare it against the frame time at the bottom of this window to"
                                   "\nsee what it is costing you.");
         }
@@ -301,6 +328,19 @@ void RenderMenu(Config* config, float menuResScale)
         }
 
         ImGui::SeparatorText("How much of it lands");
+
+        if (presentGame) {
+            bool preserveBaseTone = config->DlssNrPreserveBaseTone.value_or_default();
+            if (ImGui::Checkbox("Preserve base colour and lighting", &preserveBaseTone))
+                config->DlssNrPreserveBaseTone = preserveBaseTone;
+            HelpMarker("For the D3D11 finished-frame SDR path and the Tekken HDR adapter. Transfers small-scale model"
+                       "\ndetails while removing broad changes in colour and lighting."
+                       "\nThis is a presentation filter: the full model and its history still run unchanged."
+                       "\nOff restores the complete model edit. Colour strength 0 by itself preserves"
+                       "\nhue, but still allows the model to brighten or darken whole materials."
+                       "\nFor HDR, filtering runs in the normalized proxy before restoring scene lighting."
+                       "\nThe HDR adapter then applies colour and detail strength once.");
+        }
 
         float transfer = config->DlssNrTransferStrength.value_or_default();
         if (ImGui::SliderFloat("Detail strength", &transfer, 0.0f, 2.0f, "%.2f"))

@@ -15,12 +15,38 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <wrl/client.h>
 
 namespace ValheimNr_Dx11 {
 namespace {
 using Microsoft::WRL::ComPtr;
 std::mutex g_interop_mutex;
+std::mutex g_status_mutex;
+PreparationStatus g_preparation;
+std::chrono::steady_clock::time_point g_preparation_started;
+std::chrono::steady_clock::time_point g_preparation_visible_until;
+
+void SetPreparation(UINT width, UINT height, bool pending, std::string message) {
+    std::lock_guard lock(g_status_mutex);
+    const auto now = std::chrono::steady_clock::now();
+    if (g_preparation.width == 0 || (pending && (!g_preparation.pending || g_preparation.width != width ||
+                    g_preparation.height != height)))
+        g_preparation_started = now;
+    if (pending) {
+        if (!g_preparation.pending || message != g_preparation.message)
+            LOG_INFO("SNR preparation {}x{}: {}", width, height, message);
+        g_preparation = {true, width, height, 0.0, std::move(message), true, false};
+        g_preparation_visible_until = now + std::chrono::seconds(6);
+    } else if (g_preparation.pending || (!message.empty() && message != g_preparation.message)) {
+        const double seconds = std::chrono::duration<double>(now - g_preparation_started).count();
+        const bool failed = !message.empty();
+        if (!failed) message = "SNR is ready";
+        g_preparation = {false, width, height, seconds, std::move(message), true, failed};
+        g_preparation_visible_until = now + std::chrono::seconds(6);
+        LOG_INFO("SNR preparation {}x{} finished in {:.2f}s: {}", width, height, seconds, g_preparation.message);
+    }
+}
 
 bool IsSupported(DXGI_FORMAT format) {
     return format == DXGI_FORMAT_R16G16B16A16_FLOAT ||
@@ -51,13 +77,32 @@ struct Session {
     bool history_invalid = true;
     bool previous_estimate_motion = false;
     bool failed = false;
+    double last_frame_ms = 0, last_model_ms = 0;
+    uint64_t model_generation = 0;
+
+    ArcNrSyclLoader::Preparation PrepareProvider(UINT w, UINT h, std::string& error) {
+        const auto dir = Util::DllPath().parent_path();
+        if (!provider.Loaded() && !provider.Load(dir / "arc_nr_sycl.dll", error)) {
+            SetPreparation(w, h, false, error);
+            return ArcNrSyclLoader::Preparation::Failed;
+        }
+        const auto logical = (dir / "arc_nr_weights" / "logical").u8string();
+        const auto derived = (dir / "arc_nr_weights" / "derived").u8string();
+        ArcNrSyclCreate create {sizeof(create), w, h,
+            reinterpret_cast<const char*>(logical.c_str()),
+            reinterpret_cast<const char*>(derived.c_str())};
+        const auto state = provider.PrepareAsync(create, error);
+        SetPreparation(w, h, state == ArcNrSyclLoader::Preparation::Pending,
+            state == ArcNrSyclLoader::Preparation::Pending ? provider.PreparationMessage() : error);
+        return state;
+    }
 
     ~Session() { Release(); }
 
-    void Release() {
+    void Release(bool release_provider = true) {
         // Keep the DLL and its selected Level Zero device alive across
         // swapchain resize; only the resolution-dependent session is rebuilt.
-        provider.ResetSession();
+        if (release_provider) provider.ResetSession();
         bridge.Reset();
         Dx11WithDx12::ReleaseSharedResource(&color);
         Dx11WithDx12::ReleaseSharedResource(&output);
@@ -78,7 +123,8 @@ struct Session {
 
     bool Initialize(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& desc,
                     std::string& error) {
-        Release();
+        // The background model is ready. Rebuild only the graphics resources.
+        Release(false);
         if (!WithDx12::PrepareD3D12ForD3D11(device, D3D_FEATURE_LEVEL_11_0)) {
             error = "no D3D12 queue on the D3D11 adapter";
             return false;
@@ -122,34 +168,9 @@ struct Session {
             return false;
         }
 
-        const auto dir = Util::DllPath().parent_path();
-        const auto weights = dir / "arc_nr_weights";
-        const auto logical = weights / "logical";
-        const auto derived = weights / "derived";
-        if (!std::filesystem::is_directory(logical) ||
-            !std::filesystem::is_directory(derived)) {
-            error = "arc_nr_weights/logical and derived are missing";
-            return false;
-        }
-        if (!provider.Loaded() &&
-            !provider.Load(dir / "arc_nr_sycl.dll", error)) return false;
-        const auto logical_bytes = logical.u8string();
-        const auto derived_bytes = derived.u8string();
-        const std::string logical_utf8(
-            reinterpret_cast<const char*>(logical_bytes.data()),
-            logical_bytes.size());
-        const std::string derived_utf8(
-            reinterpret_cast<const char*>(derived_bytes.data()),
-            derived_bytes.size());
-        ArcNrSyclCreate create {};
-        create.struct_size = sizeof(create);
-        create.width = desc.Width;
-        create.height = desc.Height;
-        create.logical_weights_directory = logical_utf8.c_str();
-        create.derived_weights_directory = derived_utf8.c_str();
-        if (!provider.Create(create, error)) return false;
         width = desc.Width;
         height = desc.Height;
+        model_generation = provider.Generation();
         format = desc.Format;
         LOG_INFO("D3D11 Present SYCL NR ready: {}x{}, DXGI format {}",
                  width, height, static_cast<int>(format));
@@ -164,7 +185,7 @@ struct Session {
                         float motion_scale_x, float motion_scale_y,
                         bool external_reset, bool copy_back,
                         ComPtr<ID3D11Texture2D>* result,
-                        std::string& error) {
+                        std::string& error, bool external_hdr_composition = false) {
         // Dx11WithDx12 maintains process-wide D3D11/D3D12 synchronization
         // objects. Present and pre-XeSS sessions must not rebind them at once.
         std::lock_guard<std::mutex> interop_lock(g_interop_mutex);
@@ -192,7 +213,10 @@ struct Session {
             return false;
         }
         if (device11.Get() != device || width != desc.Width ||
-            height != desc.Height || format != desc.Format) {
+            height != desc.Height || format != desc.Format ||
+            model_generation != provider.Generation() || !provider.Ready()) {
+            if (PrepareProvider(desc.Width, desc.Height, error) != ArcNrSyclLoader::Preparation::Ready)
+                return false;
             LOG_INFO("D3D11 Present SYCL NR reinitialize: device {} -> {}, size {}x{} -> {}x{}, format {} -> {}",
                      static_cast<const void*>(device11.Get()),
                      static_cast<const void*>(device), width, height,
@@ -202,6 +226,7 @@ struct Session {
         }
         Dx11WithDx12::Init(device11.Get(), context11.Get(),
                            device12.Get(), queue12.Get());
+        const auto started = std::chrono::steady_clock::now();
         if (!Dx11WithDx12::PrepareTextureFrom11To12(
                 "D3D11 NR color", device12.Get(), input, &color,
                 true, false, false, 0) ||
@@ -240,11 +265,20 @@ struct Session {
                 std::clamp(value, 0.0f, 4095.0f / 1024.0f) * 1024.0f));
         };
         const uint32_t colour_strength = strength_q10(
-            cfg->DlssNrColourStrength.value_or_default());
+            external_hdr_composition ? 1.0f : cfg->DlssNrColourStrength.value_or_default());
         const uint32_t transfer_strength = strength_q10(
-            cfg->DlssNrTransferStrength.value_or_default());
+            external_hdr_composition ? 1.0f : cfg->DlssNrTransferStrength.value_or_default());
         frame.reserved = (estimate_motion ? 1u : 0u) | 2u |
                          (colour_strength << 8) | (transfer_strength << 20);
+        // External HDR callers pass Adapter::Proxy(), not scene-linear HDR.
+        // Filter that normalized model edit before Adapter::Resolve restores HDR.
+        // Colour/transfer stay at 1 here: the adapter owns those controls.
+        if (cfg->DlssNrPreserveBaseTone.value_or_default())
+            frame.reserved |= 4u;
+        if (frame.frame_index % 120 == 0)
+            LOG_INFO("D3D11 NR presentation: preserve_base_tone={} domain={}",
+                     cfg->DlssNrPreserveBaseTone.value_or_default(),
+                     external_hdr_composition ? "HDR proxy before resolve" : "SDR display");
         frame.normalized_style =
             std::min(1.0f, cfg->DlssNrStyle.value_or_default() / 2.0f);
         frame.local_tone = cfg->DlssNrLocalTone.value_or_default();
@@ -271,6 +305,9 @@ struct Session {
         if (copy_back && cfg->DlssNrApplyModel.value_or_default())
             context11->CopyResource(input, output11.Get());
         if (result) *result = output11;
+        last_frame_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        last_model_ms = bridge.LastProviderTimings().model_us / 1000.0;
         return true;
     }
 
@@ -298,6 +335,8 @@ ComPtr<ID3D11Texture2D> g_pre_xess_subrect_input11;
 ComPtr<ID3D11Device> g_pre_xess_subrect_device;
 std::atomic<bool> g_running {false};
 std::atomic<double> g_last_ms {0.0};
+std::atomic<double> g_last_model_ms {0.0};
+bool g_pre_xess_measured = false; // protected by g_session_mutex
 std::string g_failure_reason;
 struct PreXeSSPresent {
     ComPtr<ID3D11Device> device;
@@ -305,6 +344,7 @@ struct PreXeSSPresent {
     UINT height = 0;
     std::chrono::steady_clock::time_point submitted {};
     bool pending = false;
+    bool measured = false;
 };
 // Protected by g_session_mutex, the same lock used by BeforePresent.
 PreXeSSPresent g_pre_xess_present;
@@ -312,6 +352,14 @@ PreXeSSPresent g_pre_xess_present;
 
 bool IsSupportedGame() {
     static const bool supported_game = [] {
+        // Explicit opt-in for the generic SDR, post-tonemap D3D11 path.
+        // This does not enable Tekken's engine-specific TAA/depth hooks.
+        std::error_code error;
+        if (std::filesystem::is_regular_file(Util::DllPath().parent_path() /
+                "OptiScaler.snr-present.enable", error)) {
+            LOG_INFO("Generic D3D11 Present SNR enabled by local marker");
+            return true;
+        }
         const auto executable = Util::ExePath().filename();
         return _wcsicmp(executable.c_str(), L"valheim.exe") == 0 ||
                _wcsicmp(executable.c_str(),
@@ -361,47 +409,94 @@ void BeforePresent(IDXGISwapChain* swapchain, ID3D11Device* device) {
                 g_session.Release();
             }
             g_pre_xess_present.pending = false;
-            g_running = true;
+            g_running = g_pre_xess_present.measured;
             return;
         }
         if (std::chrono::steady_clock::now() - g_pre_xess_present.submitted >
             std::chrono::milliseconds(250))
             g_pre_xess_present = {};
     }
+    static const bool native_tekken = [] {
+        const auto executable = Util::ExePath().filename();
+        std::error_code error;
+        return _wcsicmp(executable.c_str(),
+                        L"TekkenGame-Win64-Shipping.exe") == 0 &&
+            std::filesystem::exists(Util::DllPath().parent_path() /
+                                    "OptiScaler.snr-xess.native.enable", error);
+    }();
+    if (native_tekken) {
+        // The native hook either submitted XeSS or kept the game's own TAA
+        // and spatial upscale. Never run the final-frame fallback as well.
+        g_running = false;
+        return;
+    }
     if (g_session.failed) return;
-    const auto started = std::chrono::steady_clock::now();
     std::string error;
     if (!g_session.Process(swapchain, device, error)) {
+        if (error.empty()) { g_running = false; return; } // preparation pending
         LOG_ERROR("D3D11 Present SYCL NR disabled after failure: {}", error);
         g_session.failed = true;
         g_failure_reason = error;
         g_running = false;
         return;
     }
-    const double ms = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - started).count();
+    const double ms = g_session.last_frame_ms;
     g_last_ms = ms;
+    g_last_model_ms = g_session.last_model_ms;
     g_failure_reason.clear();
     g_running = true;
     if (g_session.frame_index % 30 == 0)
-        LOG_INFO("D3D11 Present NR-PROFILE frame={} {}x{} total={:.2f}ms estimated_motion={}",
+        LOG_INFO("D3D11 Present NR-PROFILE frame={} {}x{} total={:.2f}ms estimated_motion={} preserve_base_tone={}",
                  g_session.frame_index, g_session.width, g_session.height, ms,
-                 g_session.previous_estimate_motion);
+                 g_session.previous_estimate_motion,
+                 Config::Instance()->DlssNrPreserveBaseTone.value_or_default());
 }
 bool IsRunning() { return g_running.load(); }
 std::optional<double> LastFrameMs() {
     return g_running.load() ? std::optional<double>(g_last_ms.load())
                             : std::nullopt;
 }
+std::optional<double> LastModelMs() {
+    return g_running.load() ? std::optional<double>(g_last_model_ms.load()) : std::nullopt;
+}
+PreparationStatus GetPreparationStatus() {
+    std::lock_guard lock(g_status_mutex);
+    auto result = g_preparation;
+    result.visible = result.pending || std::chrono::steady_clock::now() < g_preparation_visible_until;
+    if (result.pending)
+        result.seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - g_preparation_started).count();
+    return result;
+}
+bool PrepareWithMotion(UINT width, UINT height) {
+    std::lock_guard lock(g_pre_xess_mutex);
+    std::string error;
+    const auto ready = g_pre_xess_session.PrepareProvider(width, height, error);
+    std::lock_guard state_lock(g_session_mutex);
+    g_pre_xess_measured = false;
+    if (ready != ArcNrSyclLoader::Preparation::Ready) {
+        if (!error.empty() && error != g_failure_reason)
+            LOG_ERROR("SNR background preparation failed: {}", error);
+        g_failure_reason = error;
+        g_running = false;
+        return false;
+    }
+    g_failure_reason.clear();
+    return true;
+}
 std::string FailureReason() {
     std::lock_guard<std::mutex> lock(g_session_mutex);
     return g_failure_reason;
 }
 void RetryAfterFailure() {
-    std::lock_guard<std::mutex> lock(g_session_mutex);
+    std::scoped_lock lock(g_session_mutex, g_pre_xess_mutex);
     std::lock_guard<std::mutex> interop_lock(g_interop_mutex);
     g_session.Release();
     g_session.failed = false;
+    g_session.provider.RetryPreparation();
+    g_pre_xess_session.Release();
+    g_pre_xess_session.failed = false;
+    g_pre_xess_session.provider.RetryPreparation();
     g_pre_xess_present = {};
     g_failure_reason.clear();
     g_running = false;
@@ -420,9 +515,10 @@ void MarkPreXeSSOutput(ID3D11DeviceContext* context, ID3D11Resource* output) {
     g_pre_xess_present.height = desc.Height;
     g_pre_xess_present.submitted = std::chrono::steady_clock::now();
     g_pre_xess_present.pending = true;
+    g_pre_xess_present.measured = std::exchange(g_pre_xess_measured, false);
 }
 
-bool ProcessBeforeXeSS(ID3D11DeviceContext* context,
+bool ProcessWithMotion(ID3D11DeviceContext* context,
                        ID3D11Texture2D* color,
                        ID3D11Texture2D* motion_input,
                        UINT input_width, UINT input_height,
@@ -432,9 +528,13 @@ bool ProcessBeforeXeSS(ID3D11DeviceContext* context,
                        float motion_scale_x, float motion_scale_y,
                        bool reset_history,
                        ComPtr<ID3D11Texture2D>& result,
-                       std::string& error) {
+                       std::string& error, bool external_hdr_composition) {
     std::lock_guard<std::mutex> lock(g_pre_xess_mutex);
     result.Reset();
+    {
+        std::lock_guard state_lock(g_session_mutex);
+        g_pre_xess_measured = false;
+    }
     const auto* cfg = Config::Instance();
     if (!cfg->DlssNrEnabled.value_or_default() ||
         cfg->DlssNrBackend.value_or_default() != 1) {
@@ -449,7 +549,7 @@ bool ProcessBeforeXeSS(ID3D11DeviceContext* context,
     }
     if (!context || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE ||
         !color || !motion_input || input_width == 0 || input_height == 0) {
-        error = "XeSS pre-upscale SNR needs immediate context, color and motion";
+        error = "SNR needs immediate context, color and motion";
         return false;
     }
     D3D11_TEXTURE2D_DESC color_desc {}, motion_desc {};
@@ -472,13 +572,13 @@ bool ProcessBeforeXeSS(ID3D11DeviceContext* context,
         motion_width == 0 || motion_height == 0 ||
         motion_width > motion_desc.Width - motion_base_x ||
         motion_height > motion_desc.Height - motion_base_y) {
-        error = "XeSS pre-upscale SNR requires a supported color subrect and valid R16G16/R32G32 motion";
+        error = "SNR requires a supported color subrect and valid R16G16/R32G32 motion";
         return false;
     }
     ComPtr<ID3D11Device> device;
     context->GetDevice(&device);
     if (!device) {
-        error = "XeSS pre-upscale D3D11 device is unavailable";
+        error = "SNR D3D11 device is unavailable";
         return false;
     }
     if (g_pre_xess_session.failed) return false;
@@ -505,7 +605,7 @@ bool ProcessBeforeXeSS(ID3D11DeviceContext* context,
             const HRESULT hr = device->CreateTexture2D(
                 &extracted_desc, nullptr, &g_pre_xess_subrect_input11);
             if (FAILED(hr)) {
-                error = "XeSS pre-upscale SNR color subrect texture creation failed";
+                error = "SNR color subrect texture creation failed";
                 return false;
             }
             g_pre_xess_subrect_device = device;
@@ -519,12 +619,20 @@ bool ProcessBeforeXeSS(ID3D11DeviceContext* context,
     if (!g_pre_xess_session.ProcessTexture(nr_input, device.Get(), motion_input,
             input_width, input_height, motion_base_x, motion_base_y,
             motion_width, motion_height, motion_scale_x, motion_scale_y,
-            reset_history, false, &result, error)) {
+            reset_history, false, &result, error, external_hdr_composition)) {
+        if (error.empty()) return false; // worker is still preparing the model
         g_pre_xess_session.failed = true;
         std::lock_guard<std::mutex> interop_lock(g_interop_mutex);
         g_pre_xess_session.Release();
-        LOG_ERROR("XeSS pre-upscale SYCL NR skipped: {}", error);
+        LOG_ERROR("SYCL NR with external motion skipped: {}", error);
         return false;
+    }
+    {
+        std::lock_guard state_lock(g_session_mutex);
+        g_last_ms = g_pre_xess_session.last_frame_ms;
+        g_last_model_ms = g_pre_xess_session.last_model_ms;
+        g_pre_xess_measured = true;
+        g_failure_reason.clear();
     }
     return cfg->DlssNrApplyModel.value_or_default();
 }

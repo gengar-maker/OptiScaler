@@ -1,4 +1,6 @@
 #include "pch.h"
+#include "XeSS_Native_Dx12.h"
+#include <proxies/XeSS_Proxy.h>
 #include "XeSS_Dx12.h"
 
 #include "NVNGX_Parameter.h"
@@ -96,6 +98,8 @@ static bool CreateDLSSContext(xess_context_handle_t handle, ID3D12GraphicsComman
 
 xess_result_t hk_xessD3D12CreateContext(ID3D12Device* pDevice, xess_context_handle_t* phContext)
 {
+    if (XeSSNativeDx12::Enabled()) return XeSSNativeDx12::Create(pDevice, phContext);
+
     LOG_DEBUG("");
 
     if (pDevice == nullptr)
@@ -132,12 +136,19 @@ xess_result_t hk_xessD3D12CreateContext(ID3D12Device* pDevice, xess_context_hand
 xess_result_t hk_xessD3D12BuildPipelines(xess_context_handle_t hContext, ID3D12PipelineLibrary* pPipelineLibrary,
                                          bool blocking, uint32_t initFlags)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessD3D12BuildPipelines;
+        return fn ? fn(hContext, pPipelineLibrary, blocking, initFlags) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_WARN("");
     return XESS_RESULT_SUCCESS;
 }
 
 xess_result_t hk_xessD3D12Init(xess_context_handle_t hContext, const xess_d3d12_init_params_t* pInitParams)
 {
+    if (XeSSNativeDx12::Owns(hContext)) return XeSSNativeDx12::Init(hContext, pInitParams);
+
     LOG_DEBUG("");
 
     xess_d3d12_init_params_t ip {};
@@ -166,6 +177,8 @@ xess_result_t hk_xessD3D12Init(xess_context_handle_t hContext, const xess_d3d12_
 xess_result_t hk_xessD3D12Execute(xess_context_handle_t hContext, ID3D12GraphicsCommandList* pCommandList,
                                   const xess_d3d12_execute_params_t* pExecParams)
 {
+    if (XeSSNativeDx12::Owns(hContext)) return XeSSNativeDx12::Execute(hContext, pCommandList, pExecParams);
+
     LOG_DEBUG("");
 
     if (pCommandList == nullptr)
@@ -256,6 +269,11 @@ xess_result_t hk_xessD3D12Execute(xess_context_handle_t hContext, ID3D12Graphics
 
 xess_result_t hk_xessD3D12GetInitParams(xess_context_handle_t hContext, xess_d3d12_init_params_t* pInitParams)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessD3D12GetInitParams;
+        return fn ? fn(hContext, pInitParams) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("");
 
     if (!_d3d12InitParams.contains(hContext))
@@ -280,12 +298,22 @@ xess_result_t hk_xessD3D12GetInitParams(xess_context_handle_t hContext, xess_d3d
 xess_result_t hk_xessD3D12GetResourcesToDump(xess_context_handle_t hContext,
                                              xess_resources_to_dump_t** pResourcesToDump)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessD3D12GetResourcesToDump;
+        return fn ? fn(hContext, pResourcesToDump) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("");
     return XESS_RESULT_SUCCESS;
 }
 
 xess_result_t hk_xessD3D12GetProfilingData(xess_context_handle_t hContext, xess_profiling_data_t** pProfilingData)
 {
+    if (XeSSNativeDx12::Owns(hContext)) {
+        auto fn = XeSSProxy::GameRuntime().xessD3D12GetProfilingData;
+        return fn ? fn(hContext, pProfilingData) : XESS_RESULT_ERROR_UNSUPPORTED;
+    }
+
     LOG_DEBUG("");
     return XESS_RESULT_SUCCESS;
 }

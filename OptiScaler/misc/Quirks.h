@@ -277,6 +277,10 @@ static const QuirkEntry quirkTable[] = {
     // Tekken 7 requests D3D11 feature level 11_0. Elevating it to 11_1
     // causes a cyan veil and incorrect colors with the DXGI overlay active.
     QUIRK_ENTRY_UE(tekkengame, GameQuirk::SkipD3D11FeatureLevelElevation),
+    // Fast Food Simulator: preserve the engine's D3D11 feature level for the
+    // opt-in final-frame SNR path. It does not need GPU identity spoofing.
+    QUIRK_ENTRY_UE(projectbakery, GameQuirk::SkipD3D11FeatureLevelElevation,
+                   GameQuirk::DisableDxgiSpoofing),
 
     // Prey 2017
     // Requires Prey Luma Remastered mod for upscalers

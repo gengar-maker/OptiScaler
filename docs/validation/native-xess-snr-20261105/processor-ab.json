@@ -1,0 +1,131 @@
+{
+  "baseline": {
+    "samples": 48,
+    "pass_median_ms": 30.59025,
+    "model_median_ms": 17.500999999999998,
+    "gpu_median_ms": {
+      "fallback": 0.0242708,
+      "encode": 0.0330208,
+      "inputCopy": 8.20396,
+      "outputCopy": 0.215807,
+      "resolve": 0.05565105
+    },
+    "sha256": {
+      "d3d12-snr-hdr.bin": "478a16a19d3e222d9288c87e7d6c40039b4db650789e0099df361fbd9011bb4a",
+      "last-frame.bin": "b6dd466cda8897a318f560e1425ceeaa8af509dd792fac8aff9d696f1bd766f0"
+    }
+  },
+  "batched": {
+    "samples": 48,
+    "pass_median_ms": 30.3276,
+    "model_median_ms": 17.5405,
+    "gpu_median_ms": {
+      "fallback": 0.025,
+      "encode": 0.0321354,
+      "inputCopy": 9.515415,
+      "outputCopy": 0.217318,
+      "resolve": 0.0551562
+    },
+    "sha256": {
+      "d3d12-snr-hdr.bin": "478a16a19d3e222d9288c87e7d6c40039b4db650789e0099df361fbd9011bb4a",
+      "last-frame.bin": "b6dd466cda8897a318f560e1425ceeaa8af509dd792fac8aff9d696f1bd766f0"
+    }
+  },
+  "local-heap": {
+    "samples": 48,
+    "pass_median_ms": 20.2245,
+    "model_median_ms": 17.486,
+    "gpu_median_ms": {
+      "fallback": 0.0247396,
+      "encode": 0.0314583,
+      "inputCopy": 0.0561458,
+      "outputCopy": 0.026875,
+      "resolve": 0.0547396
+    },
+    "sha256": {
+      "d3d12-snr-hdr.bin": "478a16a19d3e222d9288c87e7d6c40039b4db650789e0099df361fbd9011bb4a",
+      "last-frame.bin": "b6dd466cda8897a318f560e1425ceeaa8af509dd792fac8aff9d696f1bd766f0"
+    }
+  },
+  "serial-cross": {
+    "samples": 80,
+    "pass_median_ms": 30.43395,
+    "model_median_ms": 17.4845,
+    "gpu_median_ms": {
+      "fallback": 0.0214583,
+      "encode": 0.0327604,
+      "inputCopy": 8.73958,
+      "outputCopy": 0.21737,
+      "resolve": 0.05622395
+    },
+    "sha256": {
+      "d3d12-snr-hdr.bin": "478a16a19d3e222d9288c87e7d6c40039b4db650789e0099df361fbd9011bb4a",
+      "last-frame.bin": "0c0bc1ff11ebe955d1047a6d0e61bf594ce1273934fcc4642af25452d4380ce3"
+    }
+  },
+  "batched-cross": {
+    "samples": 80,
+    "pass_median_ms": 29.492,
+    "model_median_ms": 17.461,
+    "gpu_median_ms": {
+      "fallback": 0.021875,
+      "encode": 0.03195315,
+      "inputCopy": 8.86703,
+      "outputCopy": 0.214896,
+      "resolve": 0.0559375
+    },
+    "sha256": {
+      "d3d12-snr-hdr.bin": "478a16a19d3e222d9288c87e7d6c40039b4db650789e0099df361fbd9011bb4a",
+      "last-frame.bin": "0c0bc1ff11ebe955d1047a6d0e61bf594ce1273934fcc4642af25452d4380ce3"
+    }
+  },
+  "batched-local": {
+    "samples": 80,
+    "pass_median_ms": 20.013199999999998,
+    "model_median_ms": 17.496000000000002,
+    "gpu_median_ms": {
+      "fallback": 0.021875,
+      "encode": 0.03179685,
+      "inputCopy": 0.0567708,
+      "outputCopy": 0.0267187,
+      "resolve": 0.0545573
+    },
+    "sha256": {
+      "d3d12-snr-hdr.bin": "478a16a19d3e222d9288c87e7d6c40039b4db650789e0099df361fbd9011bb4a",
+      "last-frame.bin": "0c0bc1ff11ebe955d1047a6d0e61bf594ce1273934fcc4642af25452d4380ce3"
+    }
+  },
+  "serial-cross-repeat": {
+    "samples": 80,
+    "pass_median_ms": 31.34565,
+    "model_median_ms": 17.427500000000002,
+    "gpu_median_ms": {
+      "fallback": 0.0214583,
+      "encode": 0.03247395,
+      "inputCopy": 9.367345,
+      "outputCopy": 0.218307,
+      "resolve": 0.05625
+    },
+    "sha256": {
+      "d3d12-snr-hdr.bin": "478a16a19d3e222d9288c87e7d6c40039b4db650789e0099df361fbd9011bb4a",
+      "last-frame.bin": "0c0bc1ff11ebe955d1047a6d0e61bf594ce1273934fcc4642af25452d4380ce3"
+    }
+  },
+  "batched-local-repeat": {
+    "samples": 80,
+    "pass_median_ms": 19.99195,
+    "model_median_ms": 17.5045,
+    "gpu_median_ms": {
+      "fallback": 0.0218229,
+      "encode": 0.0316146,
+      "inputCopy": 0.0567708,
+      "outputCopy": 0.0267708,
+      "resolve": 0.0544792
+    },
+    "sha256": {
+      "d3d12-snr-hdr.bin": "478a16a19d3e222d9288c87e7d6c40039b4db650789e0099df361fbd9011bb4a",
+      "last-frame.bin": "0c0bc1ff11ebe955d1047a6d0e61bf594ce1273934fcc4642af25452d4380ce3"
+    }
+  },
+  "accuracy": "First and final full-model HDR outputs byte-identical across A/B variants; hidden edit exact, alpha and finite values checked every frame; temporal reset/continuity checked every frame."
+}

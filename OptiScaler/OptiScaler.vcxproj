@@ -425,6 +425,11 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="dlssnr\sycl\ArcNrSyclLoader.h" />
     <ClInclude Include="dlssnr\sycl\ArcNrSyclOwnedListBridge.h" />
     <ClInclude Include="dlssnr\sycl\ValheimNr_Dx11.h" />
+    <ClInclude Include="dlssnr\sycl\TekkenTemporalInputs_Dx11.h" />
+    <ClInclude Include="dlssnr\sycl\TekkenSNRXeSS_Dx11.h" />
+    <ClInclude Include="dlssnr\sycl\TekkenHdrPostProcess_Dx11.h" />
+    <ClInclude Include="dlssnr\sycl\NrHdrAdapter_Dx11.h" />
+    <ClInclude Include="dlssnr\sycl\NrDisplayMotion_Dx11.h" />
     <ClInclude Include="hooks\D3D11_FrameTrace.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScan.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_pm_PShader.h" />
@@ -478,6 +483,9 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="inputs\XeSS_Common.h" />
     <ClInclude Include="inputs\XeSS_Dbg.h" />
     <ClInclude Include="inputs\XeSS_Dx12.h" />
+    <ClInclude Include="dlssnr\sycl\D3D12CommandSplice.h" />
+    <ClInclude Include="dlssnr\sycl\Dx12InputSnapshot.h" />
+    <ClInclude Include="inputs\XeSS_Native_Dx12.h" />
     <ClInclude Include="inputs\XeSS_Proxy.h" />
     <ClInclude Include="inputs\XeSS_Vulkan.h" />
     <ClInclude Include="menu\font\Hack_Compressed.h" />
@@ -837,6 +845,19 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="dlssnr\sycl\ArcNrSyclLoader.cpp" />
     <ClCompile Include="dlssnr\sycl\ArcNrSyclOwnedListBridge.cpp" />
     <ClCompile Include="dlssnr\sycl\ValheimNr_Dx11.cpp" />
+    <ClCompile Include="dlssnr\sycl\TekkenTemporalInputs_Dx11.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="dlssnr\sycl\TekkenSNRXeSS_Dx11.cpp" />
+    <ClCompile Include="dlssnr\sycl\TekkenHdrPostProcess_Dx11.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="dlssnr\sycl\NrHdrAdapter_Dx11.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="dlssnr\sycl\NrDisplayMotion_Dx11.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="shaders\dlssnr\DlssNr_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNrFeature_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ExposureScan.cpp" />
@@ -864,6 +885,9 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="version_check.cpp" />
     <ClCompile Include="inputs\XeSS_Debug.cpp" />
     <ClCompile Include="inputs\XeSS_Dx12.cpp" />
+    <ClCompile Include="dlssnr\sycl\D3D12CommandSplice.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="dlssnr\sycl\Dx12InputSnapshot.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="inputs\XeSS_Native_Dx12.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="OptiScaler.rc" />
@@ -874,5 +898,16 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
+    <Import Project="shaders\dlssnr\precompile\dx11_shader.targets" />
   </ImportGroup>
+  <ItemGroup>
+    <ClCompile Include="dlssnr\sycl\XeSSNrInputAdapter.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="dlssnr\sycl\XeSSNrProcessor.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="inputs\XeSS_Nr_Dx12.cpp" />
+    <ClInclude Include="dlssnr\sycl\XeSSNrInputAdapter.h" />
+    <ClInclude Include="dlssnr\sycl\XeSSNrInputContract.h" />
+    <ClInclude Include="dlssnr\sycl\XeSSNrProcessor.h" />
+    <ClInclude Include="dlssnr\sycl\NrGpuTimer.h" />
+    <ClInclude Include="inputs\XeSS_Nr_Dx12.h" />
+  </ItemGroup>
 </Project>

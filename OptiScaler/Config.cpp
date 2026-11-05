@@ -319,11 +319,13 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrEnabled.set_from_config(readBool("DlssNr", "Enabled"));
             DlssNrBackend.set_from_config(readUInt("DlssNr", "Backend"));
             DlssNrEstimateMotion.set_from_config(readBool("DlssNr", "EstimateMotion"));
+            DlssNrNativeXeSS.set_from_config(readBool("DlssNr", "NativeXeSS"));
             DlssNrNativeAfterSubmit.set_from_config(readBool("DlssNr", "NativeAfterSubmit"));
             DlssNrNativeOutputState.set_from_config(readInt("DlssNr", "NativeOutputState"));
             DlssNrToggleKey.set_from_config(readInt("DlssNr", "ToggleKey"));
             DlssNrTransferStrength.set_from_config(readFloat("DlssNr", "TransferStrength"));
             DlssNrColourStrength.set_from_config(readFloat("DlssNr", "ColourStrength"));
+            DlssNrPreserveBaseTone.set_from_config(readBool("DlssNr", "PreserveBaseTone"));
             DlssNrMaxRatio.set_from_config(readFloat("DlssNr", "MaxRatio"));
             DlssNrTransfer.set_from_config(readUInt("DlssNr", "Transfer"));
 
@@ -1204,6 +1206,7 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "Enabled", GetBoolValue(Instance()->DlssNrEnabled.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Backend", GetIntValue(Instance()->DlssNrBackend.value_for_config()).c_str());
     ini.SetValue("DlssNr", "EstimateMotion", GetBoolValue(Instance()->DlssNrEstimateMotion.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeXeSS", GetBoolValue(Instance()->DlssNrNativeXeSS.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeAfterSubmit", GetBoolValue(Instance()->DlssNrNativeAfterSubmit.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeOutputState", GetIntValue(Instance()->DlssNrNativeOutputState.value_for_config()).c_str());
     {
@@ -1214,6 +1217,8 @@ bool Config::SaveIni()
                  GetFloatValue(Instance()->DlssNrTransferStrength.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ColourStrength",
                  GetFloatValue(Instance()->DlssNrColourStrength.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "PreserveBaseTone",
+                 GetBoolValue(Instance()->DlssNrPreserveBaseTone.value_for_config()).c_str());
     ini.SetValue("DlssNr", "MaxRatio", GetFloatValue(Instance()->DlssNrMaxRatio.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Transfer", GetIntValue(Instance()->DlssNrTransfer.value_for_config()).c_str());
 

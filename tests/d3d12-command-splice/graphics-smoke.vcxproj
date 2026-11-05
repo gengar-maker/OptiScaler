@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals"><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v143</PlatformToolset></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup><TargetName>splice_graphics_smoke</TargetName><OutDir>$(ProjectDir)$(Splice)\</OutDir><IntDir>$(ProjectDir)obj-state-$(Splice)\</IntDir></PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile><PreprocessorDefinitions Condition="'$(Splice)'=='true'">SPLICE_TEST;%(PreprocessorDefinitions)</PreprocessorDefinitions><LanguageStandard>stdcpp20</LanguageStandard><RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary><AdditionalIncludeDirectories>$(ProjectDir)..\..\external\xess\inc\xess;$(ProjectDir)..\..\OptiScaler\include;$(ProjectDir)..\..\OptiScaler\dlssnr\sycl;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
+    <Link><AdditionalDependencies>d3dcompiler.lib;d3d12.lib;dxgi.lib;$(ProjectDir)..\..\OptiScaler\library\detours\detours.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup><ClCompile Include="graphics-smoke.cpp" /><ClCompile Include="..\..\OptiScaler\dlssnr\sycl\D3D12CommandSplice.cpp" Condition="'$(Splice)'=='true'" /><ClCompile Include="..\..\OptiScaler\dlssnr\sycl\Dx12InputSnapshot.cpp" Condition="'$(Splice)'=='true'" /></ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

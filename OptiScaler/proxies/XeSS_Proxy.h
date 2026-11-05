@@ -194,6 +194,8 @@ class XeSSProxy
     }
 
   public:
+    // Trampolines into the exact runtime loaded by the game.
+    static const XeSSModule& GameRuntime() { return _module_hooked; }
     static HMODULE Module() { return _module.dll; }
     static HMODULE ModuleDx11() { return _module11.dll; }
 
@@ -504,7 +506,8 @@ class XeSSProxy
             if (_module_hooked.xessD3D12GetProfilingData != nullptr)
                 DetourAttach(&(PVOID&) _module_hooked.xessD3D12GetProfilingData, hk_xessD3D12GetProfilingData);
 
-            if (_module_hooked.xessSetContextParameterF != nullptr)
+            if (_module_hooked.xessSetContextParameterF != nullptr &&
+                !Config::Instance()->DlssNrNativeXeSS.value_or_default())
                 DetourAttach(&(PVOID&) _module_hooked.xessSetContextParameterF, hk_xessSetContextParameterF);
 
             if (_module_hooked.xessVKCreateContext != nullptr)

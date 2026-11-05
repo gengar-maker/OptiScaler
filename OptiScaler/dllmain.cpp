@@ -6,6 +6,7 @@
 #include "Logger.h"
 #include "resource.h"
 #include "DllNames.h"
+#include <dlssnr/sycl/ArcNrSyclLoader.h>
 
 #include "proxies/Dxgi_Proxy.h"
 #include "proxies/Kernel32_Proxy.h"
@@ -2168,6 +2169,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     }
 
     case DLL_PROCESS_DETACH:
+        if (lpReserved != nullptr) ArcNrSyclLoader::OnProcessShutdown();
         State::Instance().isShuttingDown = true;
 
         // Unhooking and cleaning stuff causing issues during shutdown.

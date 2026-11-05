@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <NrHdrShaderSource>$(MSBuildThisFileDirectory)dlssnr.hlsl</NrHdrShaderSource>
+    <NrHdrShaderHeader>$(MSBuildThisFileDirectory)DlssNr_Shader_Dx11.h</NrHdrShaderHeader>
+  </PropertyGroup>
+  <Target Name="CompileNrHdrShaderDx11" BeforeTargets="ClCompile"
+          Inputs="$(NrHdrShaderSource)" Outputs="$(NrHdrShaderHeader)">
+    <Exec Command="&quot;$(WindowsSdkDir)bin\$(WindowsTargetPlatformVersion)\x64\fxc.exe&quot; /nologo /T cs_5_0 /E CSMain /O3 /Fh &quot;$(NrHdrShaderHeader)&quot; /Vn DlssNr_Dx11_cso &quot;$(NrHdrShaderSource)&quot;" />
+  </Target>
+</Project>

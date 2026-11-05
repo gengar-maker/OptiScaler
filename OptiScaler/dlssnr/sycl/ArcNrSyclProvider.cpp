@@ -17,9 +17,13 @@
 #include <sycl/ext/oneapi/bindless_images.hpp>
 
 #include "arc_nr/device_buffer.hpp"
+#if defined(ARC_NR_USE_OPENVINO)
+#include "runtime.hpp"
+#else
 #include "arc_nr/device_context.hpp"
-#include "arc_nr/mlx_frame_pipeline.hpp"
 #include "arc_nr/mlx_model.hpp"
+#endif
+#include "arc_nr/mlx_frame_pipeline.hpp"
 
 #if defined(_WIN32)
 #define ARC_NR_EXPORT __declspec(dllexport)
@@ -42,6 +46,9 @@ void Error(char* destination, uint32_t capacity, const char* message) {
 }
 
 sycl::queue IntelQueue() {
+#if defined(ARC_NR_USE_OPENVINO)
+    return arc_nr::ov_backend::MakeQueue();
+#else
     // Tekken recreates its D3D11 device during startup. Keep the selected
     // Level Zero device so each new SNR session does not enumerate adapters
     // while the game and another SYCL client are using the GPU.
@@ -59,13 +66,22 @@ sycl::queue IntelQueue() {
     }();
     return sycl::queue(intel_device, sycl::property_list{
         sycl::property::queue::enable_profiling{}});
+#endif
 }
+
+#if defined(ARC_NR_USE_OPENVINO)
+using ProviderContext = arc_nr::ov_backend::DeviceContext;
+using ProviderModel = arc_nr::ov_backend::Model;
+#else
+using ProviderContext = arc_nr::DeviceContext;
+using ProviderModel = arc_nr::MlxModelPlan;
+#endif
 
 struct Session {
     std::mutex mutex;
-    arc_nr::DeviceContext context;
+    ProviderContext context;
     arc_nr::MlxFramePipeline frame;
-    arc_nr::MlxModelPlan model;
+    ProviderModel model;
     const uint32_t image_width;
     const uint32_t image_height;
     const std::size_t pixels;
@@ -79,6 +95,8 @@ struct Session {
     arc_nr::DeviceBuffer<sycl::half> features;
     arc_nr::DeviceBuffer<sycl::half> head;
     arc_nr::DeviceBuffer<sycl::half> output;
+    // Allocated once on first use; not needed by the default or HDR path.
+    arc_nr::DeviceBuffer<float> base_tone_scratch;
     bool gpu_history_valid = false;
     bool previous_color_valid = false;
     uint32_t last_gpu_frame_index = 0;
@@ -87,7 +105,11 @@ struct Session {
             const std::filesystem::path& logical,
             const std::filesystem::path& derived)
         : context(IntelQueue()),
-          frame(context.queue(), width, height),
+          frame(context.queue(), width, height
+#if defined(ARC_NR_USE_OPENVINO)
+                , 16
+#endif
+          ),
           model(context, frame.network_height(), frame.network_width(),
                 logical, derived),
           image_width(width),
@@ -98,10 +120,68 @@ struct Session {
           color(context.queue(), pixels * 4),
           history(context.queue(), pixels * 4),
           motion(context.queue(), pixels * 2),
+          previous_color(context.queue(), pixels * 4),
+          motion_confidence(context.queue(), pixels),
           features(context.queue(), network_pixels * 16),
           head(context.queue(), network_pixels * 4),
           output(context.queue(), pixels * 4) {}
+    ~Session() {
+#if defined(ARC_NR_USE_OPENVINO)
+        // Release remote tensors before the externally owned USM buffers.
+        model.Reset();
+#endif
+    }
 };
+
+// Object vectors do not describe lighting and disocclusions. Compare the
+// reprojected input with the previous input before exposing temporal history
+// to the model. This also rejects vectors pointing outside the frame.
+void ConfidenceForExternalMotion(Session& session) {
+    const uint32_t w = session.image_width, h = session.image_height;
+    const auto* current = session.color.data();
+    const auto* previous = session.previous_color.data();
+    const auto* motion = session.motion.data();
+    auto* confidence = session.motion_confidence.data();
+    session.context.queue().parallel_for(sycl::range<1>(session.pixels),
+        [=](sycl::id<1> id) {
+            const size_t i = id[0];
+            const float x = static_cast<float>(i % w);
+            const float y = static_cast<float>(i / w);
+            const float px = x + static_cast<float>(motion[i * 2]) * w;
+            const float py = y + static_cast<float>(motion[i * 2 + 1]) * h;
+            if (!sycl::isfinite(px) || !sycl::isfinite(py) ||
+                px < 0.0f || py < 0.0f ||
+                px > static_cast<float>(w - 1) ||
+                py > static_cast<float>(h - 1)) {
+                confidence[i] = sycl::half(0.0f);
+                return;
+            }
+            const uint32_t x0 = static_cast<uint32_t>(px);
+            const uint32_t y0 = static_cast<uint32_t>(py);
+            const uint32_t x1 = sycl::min(x0 + 1, w - 1);
+            const uint32_t y1 = sycl::min(y0 + 1, h - 1);
+            const float tx = px - static_cast<float>(x0);
+            const float ty = py - static_cast<float>(y0);
+            float mismatch = 0.0f;
+            for (uint32_t c = 0; c < 3; ++c) {
+                const float a = static_cast<float>(previous[
+                    (static_cast<size_t>(y0) * w + x0) * 4 + c]);
+                const float b = static_cast<float>(previous[
+                    (static_cast<size_t>(y0) * w + x1) * 4 + c]);
+                const float d = static_cast<float>(previous[
+                    (static_cast<size_t>(y1) * w + x0) * 4 + c]);
+                const float e = static_cast<float>(previous[
+                    (static_cast<size_t>(y1) * w + x1) * 4 + c]);
+                const float warped = (a + tx * (b - a)) * (1.0f - ty) +
+                                     (d + tx * (e - d)) * ty;
+                mismatch += sycl::fabs(static_cast<float>(current[i * 4 + c]) -
+                                       warped);
+            }
+            const float quality = sycl::clamp((0.12f - mismatch / 3.0f) /
+                                               0.09f, 0.0f, 1.0f);
+            confidence[i] = sycl::half(quality);
+        }).wait_and_throw();
+}
 
 // Backward flow: for each current tile, find the matching location in the
 // previous pre-NR frame. Both passes stay on the Intel GPU. Pixel confidence
@@ -207,11 +287,20 @@ void* Create(const ArcNrSyclCreate* create, char* error,
             std::filesystem::u8path(create->logical_weights_directory);
         const auto derived =
             std::filesystem::u8path(create->derived_weights_directory);
+#if !defined(ARC_NR_USE_OPENVINO)
         if (!std::filesystem::is_directory(logical) ||
             !std::filesystem::is_directory(derived)) {
             Error(error, error_bytes, "SYCL model weight directory is missing");
             return nullptr;
         }
+#endif
+#if defined(ARC_NR_USE_OPENVINO)
+        arc_nr::ov_backend::SetPreparationStatus("Preparing SNR resources");
+        // Check/export before allocating any GPU resources for the new size.
+        arc_nr::ov_backend::EnsureProfile(
+            arc_nr::MlxFramePipeline::AlignedExtent(create->width, 16),
+            arc_nr::MlxFramePipeline::AlignedExtent(create->height, 16));
+#endif
         auto session = std::make_unique<Session>(create->width, create->height,
                                                  logical, derived);
         Error(error, error_bytes, "");
@@ -284,10 +373,14 @@ ArcNrSyclStatus Evaluate(void* opaque, const ArcNrSyclFrame* input,
 
 void Destroy(void* session) { delete static_cast<Session*>(session); }
 
+#if defined(ARC_NR_USE_OPENVINO)
+using ImportedHeap = arc_nr::ov_backend::ImportedHeap;
+#else
 class ImportedHeap {
 public:
-    ImportedHeap(sycl::queue& queue, void* handle, uint64_t bytes)
-        : queue_(queue) {
+    ImportedHeap(ProviderContext& context, void* handle, uint64_t bytes,
+                 bool read_input = true)
+        : queue_(context.queue()) {
         external::external_mem_descriptor<external::resource_win32_handle>
             descriptor {{handle}, external::external_mem_handle_type::win32_nt_handle,
                         static_cast<size_t>(bytes)};
@@ -305,12 +398,14 @@ public:
     ImportedHeap(const ImportedHeap&) = delete;
     ImportedHeap& operator=(const ImportedHeap&) = delete;
     sycl::half* data() const { return data_; }
+    void Flush() {}
 private:
     sycl::queue& queue_;
     external::external_mem memory_ {};
     bool imported_ = false;
     sycl::half* data_ = nullptr;
 };
+#endif
 
 ArcNrSyclStatus EvaluateGpu(void* opaque, const ArcNrSyclGpuFrame* input,
                              char* error, uint32_t error_bytes) {
@@ -370,17 +465,13 @@ ArcNrSyclStatus EvaluateGpu(void* opaque, const ArcNrSyclGpuFrame* input,
                           copied_output;
         bool temporal = false;
         {
-        ImportedHeap color_heap(queue, input->color_heap_nt_handle,
+        ImportedHeap color_heap(session.context, input->color_heap_nt_handle,
                                 input->heap_bytes);
-        ImportedHeap output_heap(queue, input->output_heap_nt_handle,
-                                 input->heap_bytes);
+        ImportedHeap output_heap(session.context, input->output_heap_nt_handle,
+                                 input->heap_bytes, false);
         const bool estimate_enabled =
             (input->controls.reserved & 1u) != 0;
-        if (estimate_enabled && !has_motion && !session.previous_color.data()) {
-            session.previous_color = arc_nr::DeviceBuffer<sycl::half>(
-                queue, session.pixels * 4);
-            session.motion_confidence = arc_nr::DeviceBuffer<sycl::half>(
-                queue, session.pixels);
+        if (estimate_enabled && !has_motion && !session.tile_motion.data()) {
             session.tile_motion = arc_nr::DeviceBuffer<int>(queue,
                 static_cast<size_t>((session.image_width + 15) / 16) *
                 ((session.image_height + 15) / 16) * 2);
@@ -389,13 +480,14 @@ ArcNrSyclStatus EvaluateGpu(void* opaque, const ArcNrSyclGpuFrame* input,
             input->controls.reset_history == 0 &&
             session.previous_color_valid;
         temporal = (has_motion || estimated_motion) &&
+            session.previous_color_valid &&
             input->controls.reset_history == 0 &&
             session.gpu_history_valid &&
             input->controls.frame_index == session.last_gpu_frame_index + 1u;
         std::unique_ptr<ImportedHeap> motion_heap;
         if (temporal && has_motion)
             motion_heap = std::make_unique<ImportedHeap>(
-                queue, input->motion_heap_nt_handle,
+                session.context, input->motion_heap_nt_handle,
                 input->motion_heap_bytes);
         imported = Clock::now();
         const auto* source = color_heap.data();
@@ -456,7 +548,8 @@ ArcNrSyclStatus EvaluateGpu(void* opaque, const ArcNrSyclGpuFrame* input,
             }).wait_and_throw();
         }
         if (temporal) {
-            std::swap(session.history, session.output);
+            // History already contains the unmodified neural reconstruction.
+            // Presentation controls must never feed back into the next frame.
             if (estimated_motion) {
                 EstimateMotion(session);
             } else {
@@ -527,9 +620,10 @@ ArcNrSyclStatus EvaluateGpu(void* opaque, const ArcNrSyclGpuFrame* input,
                         (c == 0 ? scale_x : scale_y));
                 }
             }).wait_and_throw();
+            ConfidenceForExternalMotion(session);
             }
         }
-        if (estimate_enabled && !has_motion) {
+        if (has_motion || estimate_enabled) {
             queue.memcpy(session.previous_color.data(), session.color.data(),
                          session.color.size_bytes()).wait_and_throw();
             session.previous_color_valid = true;
@@ -550,7 +644,7 @@ ArcNrSyclStatus EvaluateGpu(void* opaque, const ArcNrSyclGpuFrame* input,
                               temporal ? session.motion.data() : nullptr,
                               nullptr,
                               controls, session.features.data(),
-                              temporal && estimated_motion ?
+                              temporal ?
                                   session.motion_confidence.data() : nullptr)
             .wait_and_throw();
         prepared = Clock::now();
@@ -565,10 +659,18 @@ ArcNrSyclStatus EvaluateGpu(void* opaque, const ArcNrSyclGpuFrame* input,
         session.frame.Compose(session.color.data(), session.head.data(),
                               session.features.data(), nullptr, temporal,
                               controls, session.output.data(),
-                              temporal && estimated_motion ?
+                              temporal ?
                                   session.motion_confidence.data() : nullptr,
-                              colour_strength, transfer_strength)
+                              colour_strength, transfer_strength,
+                              session.history.data())
             .wait_and_throw();
+        if ((input->controls.reserved & 4u) != 0 && transfer_strength != 0.0f) {
+            if (!session.base_tone_scratch.data())
+                session.base_tone_scratch = arc_nr::DeviceBuffer<float>(queue, session.pixels * 4);
+            session.frame.PreserveBaseTone(session.color.data(), session.output.data(),
+                                           session.base_tone_scratch.data(),
+                                           colour_strength == 0.0f).wait_and_throw();
+        }
         composed = Clock::now();
         const auto* output = session.output.data();
         if (input->pixel_format == 0) {
@@ -627,6 +729,7 @@ ArcNrSyclStatus EvaluateGpu(void* opaque, const ArcNrSyclGpuFrame* input,
                     ((bgra ? r : b) << 16) | (a << 24);
             }).wait_and_throw();
         }
+        output_heap.Flush();
         copied_output = Clock::now();
         }
         const auto released = Clock::now();
@@ -661,6 +764,12 @@ ArcNrSyclStatus EvaluateGpu(void* opaque, const ArcNrSyclGpuFrame* input,
 }
 
 }  // namespace
+
+#if defined(ARC_NR_USE_OPENVINO)
+extern "C" ARC_NR_EXPORT void arc_nr_sycl_preparation_status(char* out, uint32_t bytes) {
+    Error(out, bytes, arc_nr::ov_backend::PreparationStatus().c_str());
+}
+#endif
 
 extern "C" ARC_NR_EXPORT int arc_nr_sycl_get_api(
     uint32_t requested_version, ArcNrSyclApi* out_api) {

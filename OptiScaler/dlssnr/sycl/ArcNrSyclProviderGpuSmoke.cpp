@@ -7,6 +7,7 @@
 #include <iostream>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
@@ -54,12 +55,22 @@ int main(int argc, char** argv) {
         const std::string colour_option = argc == 10 ? argv[9] : "";
         if (argc == 10 && !colour_option.starts_with("--colour-strength="))
             throw std::runtime_error("expected --colour-strength=VALUE");
+        const char* colour_setting = std::getenv("ARC_NR_SMOKE_COLOUR_STRENGTH");
         const float colour_strength = argc == 10
             ? std::stof(colour_option.substr(sizeof("--colour-strength=") - 1))
-            : 1.0f;
+            : colour_setting ? std::stof(colour_setting) : 1.0f;
+        const char* transfer_setting = std::getenv("ARC_NR_SMOKE_TRANSFER_STRENGTH");
+        const float transfer_strength = transfer_setting ? std::stof(transfer_setting) : 1.0f;
+        const char* tone_setting = std::getenv("ARC_NR_SMOKE_LOCAL_TONE");
+        const float local_tone = tone_setting ? std::stof(tone_setting) : 1.0f;
+        if (!std::isfinite(local_tone) || local_tone < 0.0f || local_tone > 2.0f)
+            throw std::runtime_error("local tone out of range");
         if (!std::isfinite(colour_strength) || colour_strength < 0.0f ||
             colour_strength > 4095.0f / 1024.0f)
             throw std::runtime_error("colour strength out of range");
+        if (!std::isfinite(transfer_strength) || transfer_strength < 0.0f ||
+            transfer_strength > 4095.0f / 1024.0f)
+            throw std::runtime_error("transfer strength out of range");
         const bool temporal = argc >= 8 &&
             (mode == "--temporal" || mode == "--temporal-shift" ||
              mode == "--temporal-shift4" || motion_file);
@@ -71,7 +82,10 @@ int main(int argc, char** argv) {
         if (argc == 8 && !temporal && !estimate && !rgba8 && !rgb10a2) throw std::runtime_error("expected temporal, estimate, RGBA8 or RGB10A2 mode");
         const UINT width = argc >= 7 ? static_cast<UINT>(std::stoul(argv[5])) : 320;
         const UINT height = argc >= 7 ? static_cast<UINT>(std::stoul(argv[6])) : 320;
-        if (width == 0 || height == 0 || width % 32 != 0) throw std::runtime_error("test width must be divisible by 32");
+        // These are shared linear buffers, not CopyTextureRegion footprints.
+        // Exercise non-32-aligned image widths as well (1360/1366 resize).
+        if (width == 0 || height == 0 || width > 8192 || height > 8192)
+            throw std::runtime_error("test dimensions must be 1..8192");
         const UINT64 bytes = UINT64(width) * height * ((rgba8 || rgb10a2) ? 4 : 8);
         std::ifstream file(argv[3], std::ios::binary);
         std::vector<char> color(bytes);
@@ -239,13 +253,19 @@ int main(int argc, char** argv) {
         frame.controls.struct_size = sizeof(frame.controls);
         frame.controls.reset_history = 1;
         frame.controls.reserved = estimate ? 1u : 0u;
-        if (argc == 10) {
+        if (const char* preserve = std::getenv("ARC_NR_SMOKE_PRESERVE_BASE_TONE")) {
+            if (std::string(preserve) != "0" && std::string(preserve) != "1")
+                throw std::invalid_argument("ARC_NR_SMOKE_PRESERVE_BASE_TONE must be 0 or 1");
+            if (preserve[0] == '1') frame.controls.reserved |= 4u;
+        }
+        if (argc == 10 || colour_setting || transfer_setting) {
             const auto colour_q10 = static_cast<uint32_t>(
                 std::lround(colour_strength * 1024.0f));
             frame.controls.reserved |= 2u | (colour_q10 << 8) |
-                                       (1024u << 20);
+                                       (static_cast<uint32_t>(std::lround(
+                                           transfer_strength * 1024.0f)) << 20);
         }
-        frame.controls.local_tone = 1;
+        frame.controls.local_tone = local_tone;
         frame.controls.local_structure = 1;
         frame.controls.skin_structure = -1;
         frame.controls.automatic_structure = 1;
@@ -271,7 +291,11 @@ int main(int argc, char** argv) {
         frame.timings = &timings;
         ArcNrSyclStatus status = ARC_NR_SYCL_OK;
         const bool alternate_input = shift4 || previous_file;
-        for (int i = 0; i < (alternate_input ? 2 : 4) &&
+        const char* frame_count_setting = std::getenv("ARC_NR_SMOKE_FRAMES");
+        const int frame_count = frame_count_setting ? std::stoi(frame_count_setting) : 4;
+        if (frame_count < 1 || frame_count > 10000)
+            throw std::invalid_argument("ARC_NR_SMOKE_FRAMES must be 1..10000");
+        for (int i = 0; i < (alternate_input ? 2 : frame_count) &&
                         status == ARC_NR_SYCL_OK; ++i) {
             if (alternate_input && i == 1) {
                 Check(allocator->Reset(), "shift allocator reset");
@@ -304,6 +328,20 @@ int main(int argc, char** argv) {
         }
         api.destroy(session);
         memory("after_destroy");
+        const char* recreate_setting = std::getenv("ARC_NR_SMOKE_RECREATES");
+        const int recreates = recreate_setting ? std::stoi(recreate_setting) : 0;
+        if (recreates < 0 || recreates > 10)
+            throw std::invalid_argument("ARC_NR_SMOKE_RECREATES must be 0..10");
+        for (int cycle = 0; cycle < recreates; ++cycle) {
+            session = api.create(&create, error, sizeof(error));
+            if (!session) throw std::runtime_error(error);
+            frame.controls.frame_index = 0;
+            frame.controls.reset_history = 1;
+            status = api.evaluate_gpu(session, &frame, error, sizeof(error));
+            api.destroy(session);
+            if (status != ARC_NR_SYCL_OK) throw std::runtime_error(error);
+            memory(("after_recreate_" + std::to_string(cycle + 1)).c_str());
+        }
         if (status != ARC_NR_SYCL_OK) throw std::runtime_error(error);
         Check(allocator->Reset(), "allocator reset");
         Check(list->Reset(allocator.Get(), nullptr), "list reset");
