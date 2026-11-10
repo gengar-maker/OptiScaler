@@ -8,6 +8,7 @@
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/KernelBase_Proxy.h>
 
+#include <hooks/NativeXeFG.h>
 #include <xefg_swapchain.h>
 #include <xefg_swapchain_d3d12.h>
 #include <xefg_swapchain_debug.h>
@@ -255,6 +256,7 @@ class XeFGProxy
 
         bool loadResult = _xefgSwapChainGetVersion != nullptr;
         LOG_INFO("LoadResult: {}", loadResult);
+        if (loadResult) NativeXeFG::Hook(_dll);
         return loadResult;
     }
 

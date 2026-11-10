@@ -1,0 +1,77 @@
+{
+  "date": "2026-11-10",
+  "gpu": "Intel Arc Pro B70",
+  "tested_dll_sha256": "0E74BE0E792D162049FE82FD5F201B562F7F7976FA4797DE8B466B40223A81C1",
+  "sdk": "Witcher original XeSS FG 1.2.2.118; Cyberpunk 1.1.0.19 also passed SDK smoke",
+  "sdk_regressions": [
+    {
+      "case": "original",
+      "exitCode": 0,
+      "expected": true
+    },
+    {
+      "case": "candidate-pure",
+      "exitCode": 0,
+      "expected": true
+    },
+    {
+      "case": "candidate-reflex",
+      "exitCode": 0,
+      "expected": true
+    },
+    {
+      "case": "candidate-legacy-pure",
+      "exitCode": 0,
+      "expected": true
+    },
+    {
+      "case": "reference-reflex",
+      "exitCode": 1,
+      "expected": true
+    }
+  ],
+  "live_pipeline": "Full recurrent SNR -> native XeSS -> native XeSS FG",
+  "physical_display": "Intel PresentMon frame events include application type 2 and XeFG type 50, both displayed",
+  "display_samples": [
+    {
+      "capture": "service-fg-on-01",
+      "displayedFps": 51.272178630111526,
+      "applicationFps": 25.665154821474502,
+      "displayIntervalP95Ms": 33.404900000000005,
+      "displayIntervalP99Ms": 33.4301,
+      "maxDisplayIntervalMs": 50.0355,
+      "xeLLLatencyMeanMs": 102.49786845360825,
+      "syncIntervals": {
+        "1": 969
+      },
+      "conditions": "1280x720 SNR -> native XeSS -> 1920x1080; gameplay view and ApplyModel toggles not controlled"
+    },
+    {
+      "capture": "service-fg-on-vsync-off-01",
+      "displayedFps": 55.312835003653674,
+      "applicationFps": 27.751494486621375,
+      "displayIntervalP95Ms": 18.9224,
+      "displayIntervalP99Ms": 19.513,
+      "maxDisplayIntervalMs": 35.582100000000004,
+      "xeLLLatencyMeanMs": 89.7695355123675,
+      "syncIntervals": {
+        "0": 1130
+      },
+      "conditions": "1280x720 SNR -> native XeSS -> 1920x1080; gameplay view and ApplyModel toggles not controlled"
+    },
+    {
+      "capture": "service-fg-on-vsync-off-stable",
+      "displayedFps": 48.865635972404604,
+      "applicationFps": 24.439119431866008,
+      "displayIntervalP95Ms": 21.8704,
+      "displayIntervalP99Ms": 22.7117,
+      "maxDisplayIntervalMs": 24.084,
+      "xeLLLatencyMeanMs": 101.77425113636365,
+      "syncIntervals": {
+        "0": 704
+      },
+      "conditions": "1280x720 SNR -> native XeSS -> 1920x1080; gameplay view and ApplyModel toggles not controlled"
+    }
+  ],
+  "comparison_limits": "Camera/scene load and ApplyModel toggles not controlled. These are observations, not a controlled FPS speedup claim."
+}

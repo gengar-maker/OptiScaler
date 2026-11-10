@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "Xell_Hooks.h"
 #include <detours/detours.h>
 #include <magic_enum.hpp>
@@ -49,13 +49,23 @@ void XellHooks::setOurContext(xell_context_handle_t context) { ourContext = cont
 
 void XellHooks::blockExternalContexts(bool state) { blockExternal = state; }
 
+bool XellHooks::NativePassthrough()
+{
+    return Config::Instance()->DlssNrNativeXeSS.value_or_default() &&
+           State::Instance().activeFgOutput == FGOutput::NoFG;
+}
+
+bool XellHooks::NativeLatencyActive() { return NativePassthrough() && gamesContext.load() != nullptr; }
+
 // Use context to determine blocking, otherwise just block calls from exe
 bool XellHooks::shouldBlock(xell_context_handle_t context)
 {
     if (context && ourContext != context && gamesContext != context)
         gamesContext = context;
 
-    if (!blockExternal)
+    // Never acknowledge a native SDK call without executing it: FG depends on
+    // the actual XeLL enable state, markers and context returned to the game.
+    if (NativePassthrough() || !blockExternal)
         return false;
 
     if (context)
@@ -94,19 +104,26 @@ bool XellHooks::update()
 
 xell_result_t XellHooks::hkxellDestroyContext(xell_context_handle_t context)
 {
-    if (gamesContext == context)
-        gamesContext = nullptr;
-
     if (shouldBlock(context))
         return XELL_RESULT_SUCCESS;
-    // spdlog::info("xellDestroyContext");
-    return o_xellDestroyContext(context);
+    const auto result = o_xellDestroyContext(context);
+    if (result == XELL_RESULT_SUCCESS)
+    {
+        auto expected = context;
+        if (gamesContext.compare_exchange_strong(expected, nullptr))
+            gamesContextCanLimitFps = false;
+        expected = context;
+        ourContext.compare_exchange_strong(expected, nullptr);
+    }
+    return result;
 }
 xell_result_t XellHooks::hkxellSetSleepMode(xell_context_handle_t context, const xell_sleep_params_t* param)
 {
-    if (shouldBlock(context))
+    const bool blocked = shouldBlock(context);
+    LOG_INFO("XELL-NATIVE setSleep context={:X} enabled={} blocked={}", (size_t) context,
+             param ? param->bLowLatencyMode : 0, blocked);
+    if (blocked)
         return XELL_RESULT_SUCCESS;
-    // spdlog::info("xellSetSleepMode");
     return o_xellSetSleepMode(context, param);
 }
 xell_result_t XellHooks::hkxellGetSleepMode(xell_context_handle_t context, xell_sleep_params_t* param)
@@ -141,9 +158,8 @@ xell_result_t XellHooks::hkxellGetVersion(xell_version_t* pVersion)
 xell_result_t XellHooks::hkxellSetLoggingCallback(xell_context_handle_t hContext, xell_logging_level_t loggingLevel,
                                                   xell_app_log_callback_t loggingCallback)
 {
-    if (shouldBlock(nullptr))
+    if (shouldBlock(hContext))
         return XELL_RESULT_SUCCESS;
-    // spdlog::info("xellSetLoggingCallback");
     return o_xellSetLoggingCallback(hContext, loggingLevel, loggingCallback);
 }
 xell_result_t XellHooks::hkxellD3D12CreateContext(ID3D12Device* device, xell_context_handle_t* out_context)
@@ -151,5 +167,8 @@ xell_result_t XellHooks::hkxellD3D12CreateContext(ID3D12Device* device, xell_con
     if (shouldBlock(nullptr))
         return XELL_RESULT_SUCCESS;
     // spdlog::info("xellD3D12CreateContext");
-    return o_xellD3D12CreateContext(device, out_context);
+    const auto result = o_xellD3D12CreateContext(device, out_context);
+    LOG_INFO("XELL-NATIVE create context={:X} result={}",
+             result == XELL_RESULT_SUCCESS && out_context ? (size_t) *out_context : 0, (int) result);
+    return result;
 }

@@ -1,0 +1,50 @@
+{
+  "date": "2026-11-10",
+  "gpu": "Intel Arc Pro B70",
+  "tested_dll_sha256": "E49280C1436C41E6A15BA962F416056B5B04CA74D884DF53C299EDC69BDC6457",
+  "provider_sha256": "BD5CD141EBF031419C73B1B06929D18FA5E34B9FE993E4E3474A670AE8BBF641",
+  "model": "Full FP16 OpenVINO SNR; source graph, weights and attention mathematics unchanged",
+  "sdk": "Cyberpunk original XeSS 2.0.1.41",
+  "r8_exposure_debug": {
+    "baseline": "916287B497E285A0894098A1D439321E3060FE72BC89D263B4F1AD60CFEF9627",
+    "hidden": "916287B497E285A0894098A1D439321E3060FE72BC89D263B4F1AD60CFEF9627",
+    "applied": "029D14638FBB59E8202AAAD84714A45D82DD3E042BF83BC87D268BAE0CB8214E",
+    "hiddenBitExact": true,
+    "modelChangedOutput": true,
+    "temporalConfirmed": true,
+    "additionalD3D12Errors": 0,
+    "diagnosticMultiplicitiesMatch": true,
+    "originalSDKDiagnosticCount": 25,
+    "addedDiagnostics": 0
+  },
+  "r8_exposure_release": {
+    "mode": "texture-r8-dynamic",
+    "frames": 12,
+    "hiddenBitExact": true,
+    "appliedVisible": true,
+    "temporal": true,
+    "diagnosticMultiplicitiesMatch": true
+  },
+  "r32_and_legacy_scalar_debug": [
+    {
+      "mode": "texture-dynamic",
+      "frames": 12,
+      "hiddenBitExact": true,
+      "appliedVisible": true,
+      "temporal": true,
+      "diagnosticMultiplicitiesMatch": true
+    },
+    {
+      "mode": "ldr-sa-dynamic",
+      "frames": 12,
+      "hiddenBitExact": true,
+      "appliedVisible": true,
+      "temporal": true,
+      "diagnosticMultiplicitiesMatch": true
+    }
+  ],
+  "adapter_smoke": "Passed: explicit combined-read and implicit promotion, R8 exposure snapshot, scalar equivalence, original source/alpha, exposure rewrite during inference; D3D12 validation clean",
+  "cpu_controls": "Regression rebuilt and passed 2026-11-10",
+  "cyberpunk_live": "Original launch bypassed unsupported inputs. Corrected DLL installed; new live validation pending.",
+  "host_pixel_staging": false
+}

@@ -42,6 +42,7 @@ try {
     const std::wstring mode=argv[3];
     const bool dynamic=mode.find(L"-dynamic")!=std::wstring::npos;
     const bool simultaneous=mode.find(L"-sa")!=std::wstring::npos;
+    const bool exposureR8=mode.find(L"-r8")!=std::wstring::npos;
     ComPtr<ID3D12Debug> validation;
     Check(D3D12GetDebugInterface(IID_PPV_ARGS(&validation)));
     const bool noDebug=GetEnvironmentVariableW(L"SNR_TEST_NO_DEBUG",nullptr,0)!=0;
@@ -108,7 +109,7 @@ try {
     std::cout << "returnedInit " << returned.initFlags << ' ' << int(returned.qualitySetting) << ' ' << returned.outputResolution.x << ' ' << returned.outputResolution.y << '\n';
     xess_2d_t input{},minimum{},maximum{}; XCheck(xessGetOptimalInputResolutionFn(context,&output,init.qualitySetting,&input,&minimum,&maximum));
     std::vector<ComPtr<ID3D12Resource>> uploads;
-    auto texture=[&](UINT w,UINT h,DXGI_FORMAT format,bool out,UINT kind) {
+    auto texture=[&](UINT w,UINT h,DXGI_FORMAT format,bool out,UINT kind,float exposureValue=.75f) {
         D3D12_RESOURCE_DESC d{}; d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D; d.Width=w; d.Height=h;
         d.DepthOrArraySize=d.MipLevels=d.SampleDesc.Count=1; d.Format=format;
         d.Flags=out?D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS:D3D12_RESOURCE_FLAG_NONE;
@@ -125,8 +126,10 @@ try {
                 auto* p=reinterpret_cast<uint16_t*>(mapped+y*fp.Footprint.RowPitch)+x*4;
                 p[0]=XMConvertFloatToHalf(.05f+float((x+(kind>=4?11+(kind-4)*3:0))%31)/32); p[1]=XMConvertFloatToHalf(.1f+float(y%47)/32);
                 p[2]=XMConvertFloatToHalf(.2f+float((x+y)%53)/32); p[3]=XMConvertFloatToHalf(1);
+            } else if(kind==3 && exposureR8) {
+                reinterpret_cast<unsigned char*>(mapped+y*fp.Footprint.RowPitch)[x]=static_cast<unsigned char>(exposureValue*255.f+.5f);
             } else if(kind==2||kind==3) {
-                reinterpret_cast<float*>(mapped+y*fp.Footprint.RowPitch)[x]=kind==2?.5f:.75f;
+                reinterpret_cast<float*>(mapped+y*fp.Footprint.RowPitch)[x]=kind==2?.5f:exposureValue;
             }
         }
         upload->Unmap(0,nullptr);
@@ -142,7 +145,10 @@ try {
     if(dynamic)for(UINT i=0;i<12;++i)patterns.push_back(texture(input.x+8,input.y+8,DXGI_FORMAT_R16G16B16A16_FLOAT,false,4+i));
     auto motion=texture(input.x+8,input.y+8,DXGI_FORMAT_R16G16_FLOAT,false,1);
     auto depth=texture(input.x+8,input.y+8,DXGI_FORMAT_R32_FLOAT,false,2);
-    auto exposure=texture(1,1,DXGI_FORMAT_R32_FLOAT,false,3);
+    auto exposure=texture(1,1,exposureR8?DXGI_FORMAT_R8_UNORM:DXGI_FORMAT_R32_FLOAT,false,3);
+    std::vector<ComPtr<ID3D12Resource>> exposurePatterns;
+    if(dynamic && mode.starts_with(L"texture")) for(UINT i=0;i<12;++i)
+        exposurePatterns.push_back(texture(1,1,exposureR8?DXGI_FORMAT_R8_UNORM:DXGI_FORMAT_R32_FLOAT,false,3,float(i%4+1)/5.f));
     auto result=texture(output.x+8,output.y+8,DXGI_FORMAT_R16G16B16A16_FLOAT,true,0);
     auto consumed=texture(output.x+8,output.y+8,DXGI_FORMAT_R16G16B16A16_FLOAT,true,0);
     submit(); uploads.clear();
@@ -179,9 +185,17 @@ try {
         list->CopyResource(color.Get(),pattern.Get());
         Barrier(list.Get(),pattern.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         Barrier(list.Get(),color.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if(!exposurePatterns.empty()) {
+            auto* src=exposurePatterns[frame].Get();
+            Barrier(list.Get(),src,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE);
+            Barrier(list.Get(),exposure.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+            list->CopyResource(exposure.Get(),src);
+            Barrier(list.Get(),src,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            Barrier(list.Get(),exposure.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
         xess_d3d12_execute_params_t p{}; p.pColorTexture=color.Get(); p.pVelocityTexture=motion.Get(); p.pDepthTexture=depth.Get(); p.pOutputTexture=result.Get();
         if(mode.starts_with(L"texture")) p.pExposureScaleTexture=exposure.Get();
-        p.inputWidth=input.x; p.inputHeight=input.y; p.exposureScale=.75f; p.resetHistory=frame==0||frame==6;
+        p.inputWidth=input.x; p.inputHeight=input.y; p.exposureScale=mode.starts_with(L"texture")?123.f:.75f; p.resetHistory=frame==0||frame==6;
         p.inputColorBase=p.inputMotionVectorBase=p.inputDepthBase={3,4}; p.outputColorBase={2,3};
         p.jitterOffsetX=(float(frame%3)-1)/3; p.jitterOffsetY=(float(frame%4)-1.5f)/4;
 #ifdef SPLICE_TEST

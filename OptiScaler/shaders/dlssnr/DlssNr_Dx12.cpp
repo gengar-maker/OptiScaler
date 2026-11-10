@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <dlssnr/sycl/SnrControls.h>
 
 #include <set>
 
@@ -1713,6 +1714,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // never called, which is why every one of these controls appeared to do nothing until something
     // else -- a resolution change -- happened to force a rebuild by accident.
     const bool tuningChanged = !TuningMatchesFeature(cfg);
+    if (useSycl && tuningChanged) {
+        g_nr.reset = true;
+        RecordBuiltTuning(cfg); // Live feature inputs; do not recreate the SYCL model.
+    }
 
     if (useSycl && resolutionChanged)
     {
@@ -2286,12 +2291,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         syclFrame.struct_size = sizeof(syclFrame);
         syclFrame.frame_index = static_cast<uint32_t>(g_frames);
         syclFrame.reset_history = g_nr.reset || temporalMotion == nullptr;
-        syclFrame.normalized_style = std::min(1.0f, cfg.DlssNrStyle.value_or_default() / 2.0f);
-        syclFrame.local_tone = cfg.DlssNrLocalTone.value_or_default();
-        syclFrame.local_structure = cfg.DlssNrLocalStructure.value_or_default();
-        syclFrame.skin_structure = cfg.DlssNrSkinStructure.value_or_default();
-        syclFrame.automatic_structure = cfg.DlssNrAutoMask.value_or_default() ? 1.0f : 0.0f;
-        syclFrame.intensity = cfg.DlssNrIntensity.value_or_default();
+        SnrControls::Set(syclFrame, cfg.DlssNrStyle.value_or_default(),
+            cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
+            cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default(),
+            cfg.DlssNrIntensity.value_or_default());
         std::string syclError;
         if (sycl->bridge->Run(device, timingQueue, cmdList, sycl->allocator, modelInput,
                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, g_nr.output,

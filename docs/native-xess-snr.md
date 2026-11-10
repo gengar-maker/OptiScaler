@@ -1,15 +1,15 @@
-# Native D3D12 SNR в†’ XeSS
+# Native D3D12 SNR → XeSS
 
-Status, 2026-11-05: **full OpenVINO SNR в†’ native XeSS passed the live
+Status, 2026-11-05: **full OpenVINO SNR → native XeSS passed the live
 Witcher scene check without forced D3D12 validation**. The user confirmed:
-вЂњР”РІРёР¶РµС‚СЃСЏ, РєР°СЂС‚РёРЅРєР° РЅРѕСЂРјР°Р»СЊРЅР°СЏвЂќ (moving, image looks normal). The log confirms
+“Движется, картинка нормальная” (moving, image looks normal). The log confirms
 full FP16 inference and recurrent history. This is confirmation of the tested
 scene, not exhaustive validation of every motion/disocclusion case or other games.
 The temporary mode override has been removed; the normal default is full SNR.
 The later memory/submission optimization passed standalone A/B tests and is installed;
 its live log confirms full-model inference and temporal history. The user also
 confirmed that the optimized build worked and then closed the game. The tested
-input remained 1130Г—636 with 1920Г—1080 output; no 1280Г—720 live retest was recorded.
+input remained 1130×636 with 1920×1080 output; no 1280×720 live retest was recorded.
 
 Installed OptiScaler SHA256 (pipeline-speedup build; live test confirmed by the user):
 `327B6B9E9705A2902C95A794708EC55DEC51701EFFDD602D82ED0A43B14A24CB`.
@@ -91,14 +91,25 @@ enabled. Both transfer and colour strengths are 1 in the installed package.
 
 ## Input contract and current scope
 
-The first enabled path accepts RGBA16F colour and RG16F/RG32F low-resolution
-engine motion, with scalar exposure and simultaneous-access resources. Bases and
-active rectangles are checked. Autoexposure, exposure-texture mode, high-resolution
-motion, incompatible resource formats/states and unsupported command-list scopes
-stay on the original XeSS path. This is not support for every D3D12 game.
+The path accepts RGBA16F colour and RG16F/RG32F low-resolution engine motion,
+with scalar exposure or an explicitly selected 1x1 exposure texture. Bases and
+active rectangles are checked. Autoexposure, high-resolution motion, incompatible
+formats and unsupported command-list scopes stay on original XeSS.
 
-After the prefix submission, eligible game resources decay to COMMON. Resources
-touched by SNR are restored to COMMON, and the continuation reads the separately
+Update, 2026-11-10: Cyberpunk's first live log identified two previously unsupported
+conditions: `EXPOSURE_SCALE_TEXTURE` and ordinary non-simultaneous-access inputs.
+The DLL loaded and native XeSS ran, but SNR correctly bypassed those inputs; this
+was not a successful live SNR validation. The extension now snapshots the current
+exposure on the GPU, accepting R8_UNORM/R16_UNORM/R16_FLOAT/R32_FLOAT, and reuses
+that same owned R32F snapshot for HDR encode and resolve. Texture exposure replaces
+execute.exposureScale, rather than multiplying it. The SDK exposure multiplier
+still applies. The source ONNX, weights and full FP16 provider are unchanged.
+
+Simultaneous-access colour keeps its byte-copy fast path and COMMON decay.
+Ordinary colour uses a read-only SRV-to-UAV shader snapshot. Ordinary motion is
+read without changing source states. These inputs already satisfy XeSS's SRV
+contract, or use legal implicit COMMON promotion; combined read-state bits are
+preserved. Only owned outputs are transitioned. The continuation reads the separately
 produced colour. Depth is neither read nor modified by this SNR provider and is
 forwarded to XeSS unchanged. Unsupported open queries, render passes, split
 barriers, bundles and certain newer command-list state changes reject splitting.
@@ -112,6 +123,7 @@ is advanced at actual submission, not just command recording. The model's frame
 index also determines its noise features and must match in numerical A/B tests.
 
 Scalar HDR normalization uses `whitePoint = 1 / (exposureScale * multiplier)`.
+Selected texture exposure uses GPU `whitePoint = (1 / multiplier) / texture.r`.
 Supplying a texture pointer alone does not select XeSS's exposure-texture mode.
 The model's normalized proxy is restored into the game's original HDR units
 before XeSS and game tone mapping. This is the existing HDR transfer algorithm,
@@ -125,7 +137,7 @@ model: such a job receives the committed original-colour fallback.
 
 ## Witcher capture and installed package
 
-The live capture verified 1280Г—720 colour/motion and 1920Г—1080 output at Ultra
+The live capture verified 1280×720 colour/motion and 1920×1080 output at Ultra
 Quality. Requested flags were `0x52`, queried effective flags `0x12`, velocity
 scale `(2,-2)`, jitter scale `(1,1)`, scalar exposure and multiplier both 1.
 RGB reached 109.375, so treating this as an already encoded [0,1] image is wrong.
@@ -163,17 +175,17 @@ directory junction. Its original XeSS DLL and graphics settings were unchanged.
   including fresh-Reset coverage and destination-specific dispatch.
 - Live Witcher boundary-only test: moving scene confirmed without the debug
   layer. Full-model inference subsequently runs with temporal history. A live
-  resize from 1280Г—720 input / 1920Г—1080 output to 1067Г—600 input / 1600Г—900
-  output compiled a padded 1072Г—608 profile asynchronously and resumed SNR.
+  resize from 1280×720 input / 1920×1080 output to 1067×600 input / 1600×900
+  output compiled a padded 1072×608 profile asynchronously and resumed SNR.
   The log continued native XeSS frames while the new profile was preparing.
 
 - Adapter GPU tests: nonzero colour/motion bases, pixel/NDC scales, jitter signs,
   repeated frames, neutral HDR, exact bypass and alpha preservation; D3D12 debug
   layer clean.
-- Captured 1280Г—720 HDR through the full processor: finite output, preserved
+- Captured 1280×720 HDR through the full processor: finite output, preserved
   alpha, history active on the next frame, history reset on apply transitions,
   and byte-exact HDR when `ApplyModel=false`; D3D12 debug layer clean.
-- Full proxy в†’ full OpenVINO в†’ native XeSS в†’ same-list consumer: 320Г—320,
+- Full proxy → full OpenVINO → native XeSS → same-list consumer: 320×320,
   12 frames/path. Hidden edit exactly matched the original SDK; applied edit
   changed the output; temporal processing confirmed.
 - The bundled XeSS SDK itself emits known debug message 527 for its named
@@ -248,7 +260,7 @@ wait and reads timing metadata only. `NR-GPU` logs are GPU execution intervals.
 use `NR-GPU outputCopy` and `resolve` for the deferred GPU work. The pass timer
 includes their actual completion. Model/pass timers remain wall-clock intervals.
 
-Captured Witcher HDR 1280Г—720, full FP16 graph and temporal history, no forced
+Captured Witcher HDR 1280×720, full FP16 graph and temporal history, no forced
 debug layer, 96 frames per run, first 16 excluded (80 measured samples):
 
 | Mode | Median SNR pass | Median model | GPU input copy | GPU output copy |
@@ -265,13 +277,13 @@ this sample; the memory path accounts for most of the improvement.
 
 First and final model HDR outputs match byte for byte across all A/B modes.
 Every tested frame checks finite output, exact alpha and temporal state; the
-hidden edit is byte-exact. Debug-layer HDR tests also pass. Full proxy в†’ full
-OpenVINO в†’ original XeSS в†’ GPU consumer tests retain 12 distinct output frames,
+hidden edit is byte-exact. Debug-layer HDR tests also pass. Full proxy → full
+OpenVINO → original XeSS → GPU consumer tests retain 12 distinct output frames,
 exact hidden-edit output and active history. The full model and weights, HDR
 mathematics, colour strengths and motion-vector interpretation are unchanged.
 
 Reproduce using `tests/xess-nr-input/processor-smoke.vcxproj` with a provider
-directory and capture directory containing 1280Г—720 `color.bin`. Set
+directory and capture directory containing 1280×720 `color.bin`. Set
 `SNR_BENCH_FRAMES=96`, `SNR_TEST_NO_DEBUG=1` for the release measurements.
 `SNR_BENCH_SERIAL=1` and `SNR_BENCH_CROSS_ADAPTER=1` select the original baseline
 in the standalone test driver; unset both for the optimized path. These environment
@@ -290,3 +302,9 @@ controlled before/after game-FPS comparison.
 
 The timing summary was recorded at 22:15:40. The game subsequently replaced its
 log during another startup; the retained raw log contains that later startup.
+
+## Live controls
+
+The dedicated SNR tab and reference-correct, per-frame conditioning are described
+in [SNR controls](snr-controls.md). The 2026-11-06 build adds live sliders and
+history reset/resume without changing the full FP16 model or weights.

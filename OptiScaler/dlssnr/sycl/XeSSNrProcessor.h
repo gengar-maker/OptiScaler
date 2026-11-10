@@ -9,7 +9,7 @@ namespace XeSSNr
 {
 struct Frame
 {
-    Microsoft::WRL::ComPtr<ID3D12Resource> colour, motion, output;
+    Microsoft::WRL::ComPtr<ID3D12Resource> colour, motion, output, exposure;
     unsigned width = 0, height = 0, colourX = 0, colourY = 0, motionX = 0, motionY = 0;
     uint64_t sequence = 0;
     Vec2 velocityScale { 1, 1 }, jitter {};
@@ -43,6 +43,11 @@ class Processor
     bool Run(ID3D12CommandQueue* queue, const Frame& frame, std::string& error);
     ArcNrSyclGpuTimings Timings();
     double LastFrameMs();
+    uint64_t ModelGeneration()
+    {
+        std::lock_guard lock(mutex_);
+        return provider_.Generation();
+    }
     std::array<double, NrGpuTimer::Count> GpuTimings()
     {
         std::lock_guard lock(mutex_);
@@ -61,12 +66,14 @@ class Processor
     ArcNrSyclLoader provider_;
     ArcNrSyclOwnedListBridge bridge_;
     std::unique_ptr<InputAdapter> adapter_;
+    std::unique_ptr<ReadableCopy> readableCopy_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> exposureSnapshot_;
     unsigned preparedWidth_ = 0, preparedHeight_ = 0, adapterWidth_ = 0, adapterHeight_ = 0;
     uint64_t lastSequence_ = 0, modelGeneration_ = 0;
     Vec2 previousJitter_ {};
     float previousWhite_ = 0;
     ArcNrSyclFrame previousControls_ {};
-    bool history_ = false, previousApply_ = false;
+    bool history_ = false, previousApply_ = false, previousExposureTexture_ = false;
     ArcNrSyclGpuTimings timings_ {};
     NrGpuTimer gpuTimer_;
     std::array<double, NrGpuTimer::Count> gpuMs_ {};

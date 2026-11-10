@@ -638,6 +638,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="hooks\LibraryLoad_Hooks.cpp" />
     <ClCompile Include="hooks\VulkanwDx12_Hooks.cpp" />
     <ClCompile Include="hooks\Xell_Hooks.cpp" />
+    <ClCompile Include="hooks\NativeXeFG.cpp" />
+    <ClInclude Include="hooks\NativeXeFG.h" />
     <ClCompile Include="inputs\FG\Streamline_Inputs_Sl1_Dx12.cpp" />
     <ClCompile Include="include\device_info\device_info.cpp" />
     <ClCompile Include="inputs\FG\Upscaler_Inputs_Dx11wDx12.cpp" />
@@ -908,6 +910,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="dlssnr\sycl\XeSSNrInputContract.h" />
     <ClInclude Include="dlssnr\sycl\XeSSNrProcessor.h" />
     <ClInclude Include="dlssnr\sycl\NrGpuTimer.h" />
+    <ClInclude Include="dlssnr\sycl\SnrControls.h" />
     <ClInclude Include="inputs\XeSS_Nr_Dx12.h" />
   </ItemGroup>
 </Project>

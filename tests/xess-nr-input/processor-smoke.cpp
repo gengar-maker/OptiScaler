@@ -1,5 +1,6 @@
 #include "gpu_fixture.h"
 #include "XeSSNrProcessor.h"
+#include "SnrControls.h"
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -36,8 +37,11 @@ int main(int argc, char** argv)
             Require(std::chrono::steady_clock::now() < deadline, "model compilation deadline");
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-        const unsigned frames =
+        const bool liveControls = std::getenv("SNR_TEST_LIVE_CONTROLS") != nullptr;
+        const uint64_t generation = processor.ModelGeneration();
+        const unsigned requestedFrames =
             std::getenv("SNR_BENCH_FRAMES") ? std::max(4, atoi(std::getenv("SNR_BENCH_FRAMES"))) : 4;
+        const unsigned frames = liveControls ? 19u : requestedFrames;
         for (unsigned i = 0; i < frames; ++i)
         {
             XeSSNr::Frame frame {};
@@ -58,11 +62,23 @@ int main(int argc, char** argv)
             frame.controls.local_tone = frame.controls.local_structure = frame.controls.automatic_structure =
                 frame.controls.intensity = 1;
             frame.controls.skin_structure = -1;
+            if (liveControls)
+            {
+                const unsigned phase = i / 2;
+                SnrControls::Set(frame.controls, phase >= 2 && phase < 7 ? 2u : (phase == 1 ? 1u : 0u),
+                                 phase >= 3 && phase < 7 ? 0.6f : 1.0f, phase >= 4 && phase < 7 ? 0.3f : 1.0f,
+                                 phase >= 5 && phase < 7 ? 0.2f : -1.0f, phase >= 5 && phase < 7,
+                                 phase == 6 ? 0.0f : 1.0f);
+                frame.applyModel = i != 16;
+            }
             Require(processor.Run(gpu.q.Get(), frame, error), error.c_str());
+            Require(processor.ModelGeneration() == generation, "live control change rebuilt the model");
             const auto t = processor.Timings();
-            Require(t.temporal_active == ((i == 1 || i >= 4) ? 1u : 0u), "history reset/continuity mismatch");
+            const unsigned expected =
+                liveControls ? ((i % 2 == 1 && i < 16) || i == 18 ? 1u : 0u) : ((i == 1 || i >= 4) ? 1u : 0u);
+            Require(t.temporal_active == expected, "history reset/continuity mismatch");
             const auto bytes = gpu.Read(frame.output.Get(), D3D12_RESOURCE_STATE_COMMON);
-            if (!frame.applyModel)
+            if (!frame.applyModel || (liveControls && frame.controls.intensity == 0))
                 Require(bytes == pixels, "full model ApplyModel=false is not byte exact");
             for (size_t n = 0; n < bytes.size() / 2; ++n)
             {
@@ -92,6 +108,9 @@ int main(int argc, char** argv)
             std::cout << "PASS full FP16 frame=" << i << " apply=" << frame.applyModel
                       << " temporal=" << t.temporal_active << '\n';
         }
+        if (liveControls)
+            std::cout << "PASS live Standard/Natural/Cinematic, tone, structure, skin, intensity, exact zero/bypass, "
+                         "history resumes and model generation unchanged\n";
         ComPtr<ID3D12InfoQueue> debug;
         const auto debugResult = gpu.d.As(&debug);
         Require(SUCCEEDED(debugResult) || std::getenv("SNR_TEST_NO_DEBUG"), "debug info queue missing");

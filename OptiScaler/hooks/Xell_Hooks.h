@@ -7,6 +7,7 @@
 #include <xell_d3d12.h>
 
 #include "Hook_Utils.h"
+#include <atomic>
 
 typedef decltype(&xellDestroyContext) PFN_xellDestroyContext;
 typedef decltype(&xellSetSleepMode) PFN_xellSetSleepMode;
@@ -20,10 +21,10 @@ typedef decltype(&xellD3D12CreateContext) PFN_xellD3D12CreateContext;
 
 class XellHooks
 {
-    inline static xell_context_handle_t ourContext = nullptr;
-    inline static xell_context_handle_t gamesContext = nullptr;
-    inline static bool gamesContextCanLimitFps = false;
-    inline static bool blockExternal = false;
+    inline static std::atomic<xell_context_handle_t> ourContext = nullptr;
+    inline static std::atomic<xell_context_handle_t> gamesContext = nullptr;
+    inline static std::atomic<bool> gamesContextCanLimitFps = false;
+    inline static std::atomic<bool> blockExternal = false;
 
     inline static PFN_xellDestroyContext o_xellDestroyContext = nullptr;
     inline static PFN_xellSetSleepMode o_xellSetSleepMode = nullptr;
@@ -42,6 +43,9 @@ class XellHooks
     static bool shouldBlock(xell_context_handle_t context);
     static xell_context_handle_t getOurContext() { return ourContext; };
 
+    // Native XeSS keeps the game's real XeLL, independent of translated Reflex.
+    static bool NativePassthrough();
+    static bool NativeLatencyActive();
     static bool canLimit();
     static bool update();
 

@@ -1,3 +1,4 @@
+#include "SnrControls.h"
 #define NOMINMAX
 #include "XeSSNrProcessor.h"
 #include <chrono>
@@ -75,7 +76,17 @@ void Processor::RecordOriginal(const Frame& f)
     }
     // The producer submission commits this fallback before model inference.
     gpuTimer_.Start(list_.Get(), NrGpuTimer::Fallback);
-    InputAdapter::CopyOriginal(list_.Get(), f.colour.Get(), f.colourX, f.colourY, f.width, f.height, f.output.Get());
+    if (f.colour->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)
+    {
+        InputAdapter::CopyOriginal(list_.Get(), f.colour.Get(), f.colourX, f.colourY, f.width, f.height,
+                                   f.output.Get());
+    }
+    else
+    {
+        if (!readableCopy_)
+            readableCopy_ = std::make_unique<ReadableCopy>(device_.Get());
+        readableCopy_->Record(list_.Get(), 0, f.colour.Get(), f.colourX, f.colourY, f.width, f.height, f.output.Get());
+    }
     gpuTimer_.Stop(list_.Get(), NrGpuTimer::Fallback);
 }
 void Processor::CopyAndSubmit(ID3D12CommandQueue* queue, const Frame& f)
@@ -113,19 +124,25 @@ bool Processor::Run(ID3D12CommandQueue* queue, const Frame& f, std::string& erro
     RecordOriginal(f);
     if (!options_.batchSubmissions)
         Submit(queue);
-    const bool controlsChanged = previousControls_.normalized_style != f.controls.normalized_style ||
-                                 previousControls_.local_tone != f.controls.local_tone ||
-                                 previousControls_.local_structure != f.controls.local_structure ||
-                                 previousControls_.skin_structure != f.controls.skin_structure ||
-                                 previousControls_.automatic_structure != f.controls.automatic_structure ||
-                                 previousControls_.intensity != f.controls.intensity;
+    const bool controlsChanged = !SnrControls::Equal(previousControls_, f.controls);
     const bool reset = f.reset || !history_ || controlsChanged || f.sequence != lastSequence_ + 1 ||
                        modelGeneration_ != provider_.Generation() || previousWhite_ != f.hdr.WhitePoint ||
-                       previousApply_ != f.applyModel;
+                       previousApply_ != f.applyModel || previousExposureTexture_ != bool(f.exposure);
     const auto transform = MotionToRenderPixels(f.width, f.height, f.velocityScale, f.ndc, f.jitteredMotion, f.jitter,
                                                 reset ? f.jitter : previousJitter_);
     gpuTimer_.Start(list_.Get(), NrGpuTimer::Encode);
-    adapter_->Encode(list_.Get(), f.output.Get(), f.motion.Get(), f.motionX, f.motionY, transform, f.hdr);
+    if (f.exposure)
+    {
+        if (!readableCopy_)
+            readableCopy_ = std::make_unique<ReadableCopy>(device_.Get());
+        if (!exposureSnapshot_)
+            exposureSnapshot_ = InputAdapter::MakeExposure(device_.Get());
+        // Snapshot the current frame once. Encode and resolve must use the same
+        // exposure even while inference is in flight; no CPU pixel readback.
+        readableCopy_->Record(list_.Get(), 1, f.exposure.Get(), 0, 0, 1, 1, exposureSnapshot_.Get());
+    }
+    adapter_->Encode(list_.Get(), f.output.Get(), f.motion.Get(), f.motionX, f.motionY, transform, f.hdr,
+                     f.exposure ? exposureSnapshot_.Get() : nullptr);
     gpuTimer_.Stop(list_.Get(), NrGpuTimer::Encode);
     auto controls = f.controls;
     controls.struct_size = sizeof(controls);
@@ -146,7 +163,8 @@ bool Processor::Run(ID3D12CommandQueue* queue, const Frame& f, std::string& erro
     }
     // Failure uses the shader's exact bypass, also restoring scratch states.
     gpuTimer_.Start(list_.Get(), NrGpuTimer::Resolve);
-    adapter_->Resolve(list_.Get(), f.output.Get(), success && f.applyModel);
+    adapter_->Resolve(list_.Get(), f.output.Get(), success && f.applyModel && f.controls.intensity > 0.0f,
+                      f.exposure ? exposureSnapshot_.Get() : nullptr);
     gpuTimer_.Stop(list_.Get(), NrGpuTimer::Resolve);
     Submit(queue);
     const auto gpu = gpuTimer_.ReadCompleted();
@@ -159,6 +177,7 @@ bool Processor::Run(ID3D12CommandQueue* queue, const Frame& f, std::string& erro
     previousJitter_ = f.jitter;
     previousWhite_ = f.hdr.WhitePoint;
     previousApply_ = f.applyModel;
+    previousExposureTexture_ = bool(f.exposure);
     lastSequence_ = f.sequence;
     modelGeneration_ = provider_.Generation();
     previousControls_ = f.controls;

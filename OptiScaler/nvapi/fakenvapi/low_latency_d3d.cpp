@@ -8,11 +8,20 @@
 #include "log.h"
 #include "config.h"
 #include <hooks/Reflex_Hooks.h>
+#include <hooks/Xell_Hooks.h>
 #include <framegen/nvngx/Nvngx_FG.h>
 
 // private
 bool LowLatency::update_low_latency_tech(IUnknown* pDevice)
 {
+    // A native XeSS game owns the real XeLL context and its frame IDs. A second
+    // translated context must not block it or compete for driver pacing.
+    if (XellHooks::NativeLatencyActive())
+    {
+        if (deinit_current_tech())
+            LOG_INFO("XELL-NATIVE released translated latency context; game owns pacing");
+        return true;
+    }
     if (!pDevice)
     {
         LOG_ERROR("Invalid pointer");

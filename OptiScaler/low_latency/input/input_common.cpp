@@ -3,6 +3,7 @@
 #include <misc/IdentifyGpu.h>
 
 #include "input_common.h"
+#include <hooks/Xell_Hooks.h>
 #include <low_latency/low_latency_tech/ll_xell.h>
 #include <low_latency/low_latency_tech/ll_antilag2.h>
 #include <low_latency/low_latency_tech/ll_latencyflex.h>
@@ -86,6 +87,15 @@ bool InputCommon::init_tech(IUnknown* pDevice, LowLatencyMode desiredMode)
 
 bool InputCommon::update_low_latency_tech(IUnknown* pDevice, std::optional<LowLatencyMode> mode)
 {
+    if (XellHooks::NativeLatencyActive())
+    {
+        std::scoped_lock lock(create_tech_mutex);
+        deinit_current_tech();
+        activeOutput = LowLatencyMode::None;
+        activeInput = LowLatencyInput::None;
+        delay_deinit = 0;
+        return true;
+    }
     if (avaliableInputs.count() == 0)
     {
         LOG_TRACE("No avaliable inputs");

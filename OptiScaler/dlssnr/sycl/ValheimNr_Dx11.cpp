@@ -1,4 +1,5 @@
 #include <pch.h>
+#include <dlssnr/sycl/SnrControls.h>
 #include "ValheimNr_Dx11.h"
 
 #include "ArcNrSyclLoader.h"
@@ -76,6 +77,7 @@ struct Session {
     uint32_t frame_index = 0;
     bool history_invalid = true;
     bool previous_estimate_motion = false;
+    ArcNrSyclFrame previous_controls {};
     bool failed = false;
     double last_frame_ms = 0, last_model_ms = 0;
     uint64_t model_generation = 0;
@@ -279,14 +281,11 @@ struct Session {
             LOG_INFO("D3D11 NR presentation: preserve_base_tone={} domain={}",
                      cfg->DlssNrPreserveBaseTone.value_or_default(),
                      external_hdr_composition ? "HDR proxy before resolve" : "SDR display");
-        frame.normalized_style =
-            std::min(1.0f, cfg->DlssNrStyle.value_or_default() / 2.0f);
-        frame.local_tone = cfg->DlssNrLocalTone.value_or_default();
-        frame.local_structure = cfg->DlssNrLocalStructure.value_or_default();
-        frame.skin_structure = cfg->DlssNrSkinStructure.value_or_default();
-        frame.automatic_structure =
-            cfg->DlssNrAutoMask.value_or_default() ? 1.0f : 0.0f;
-        frame.intensity = cfg->DlssNrIntensity.value_or_default();
+        SnrControls::Set(frame, cfg->DlssNrStyle.value_or_default(),
+        cfg->DlssNrLocalTone.value_or_default(), cfg->DlssNrLocalStructure.value_or_default(),
+        cfg->DlssNrSkinStructure.value_or_default(), cfg->DlssNrAutoMask.value_or_default(),
+        cfg->DlssNrIntensity.value_or_default());
+        frame.reset_history |= !SnrControls::Equal(frame, previous_controls);
         bool recording = true;
         const bool ok = bridge.Run(device12.Get(), queue12.Get(), list.Get(),
             allocator.Get(), color.Dx12Resource, D3D12_RESOURCE_STATE_COMMON,
@@ -297,6 +296,7 @@ struct Session {
             estimate_motion);
         if (recording) list->Close();
         if (!ok) return false;
+        previous_controls = frame;
         history_invalid = false;
         if (!Dx11WithDx12::SyncDx12ToDx11()) {
             error = "D3D11 NR D3D12 to D3D11 fence failed";

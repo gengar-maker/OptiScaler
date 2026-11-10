@@ -32,3 +32,20 @@ Test-driver environment controls:
 These environment controls are consumed only by the standalone test driver.
 The game uses the optimized processor defaults. Source ONNX and weights are
 unchanged. See `docs/validation/native-xess-snr-20261105` for saved results.
+
+## Native input contract regression
+
+`native-input-contract.ps1` accepts `-XeSSDll`, `-OptiScalerDll`,
+`-ProviderDirectory` and `-WorkDirectory`. The provider directory contains
+`arc_nr_sycl.dll` and `snr_openvino`. Default modes exercise ordinary textures
+with changing R8 or R32 exposure, and the legacy scalar/SA path. Scalar exposure
+is intentionally 123 in texture mode, demonstrating that it must be ignored.
+Twelve changing producer frames are consumed after XeSS on the same game list.
+Every hidden edit must match the original SDK byte for byte, the full-model edit
+must be visible, history must run, and the complete normalized D3D12 diagnostic
+multisets (including multiplicities) must match. Original SDK diagnostics are
+retained, not filtered. Use `-NoDebug` only for a separate release-driver run.
+
+The adapter smoke also validates ordinary combined-read states and implicit
+promotion, GPU R8 exposure conversion, scalar/texture HDR equivalence, alpha,
+exact bypass, and stable resolve after the original exposure resource is rewritten.

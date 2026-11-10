@@ -7014,7 +7014,6 @@ void MenuCommon::RenderMainMenuTable(RenderMenuContext& ctx)
 
         // Right column: image quality, initialization, advanced options, appearance, overlay and input settings.
         RenderActiveImageSettings(ctx);
-        DlssNr::RenderMenu(ctx.config, ctx.menuResScale);
         RenderMagnifierSettings(ctx);
         RenderQuirksSettings(ctx);
         RenderAdvancedSettings(ctx);
@@ -7592,8 +7591,24 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
         // Header/status messages shown above the two-column settings table.
         RenderMainMenuHeaderMessages(ctx);
 
-        // Main two-column settings content.
-        RenderMainMenuTable(ctx);
+        // SNR owns its settings page; the original OptiScaler layout stays together.
+        if (ImGui::BeginTabBar("OptiScalerSettingsPages"))
+        {
+            if (ImGui::BeginTabItem("OptiScaler"))
+            {
+                RenderMainMenuTable(ctx);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("SNR"))
+            {
+                const float height = std::max(180.0f, std::min(620.0f * menuResScale, ctx.io.DisplaySize.y * 0.65f));
+                if (ImGui::BeginChild("SNRSettings", ImVec2(720.0f * menuResScale, height), ImGuiChildFlags_Borders))
+                    DlssNr::RenderMenu(ctx.config, ctx.menuResScale);
+                ImGui::EndChild();
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
 
         // Diagnostics and footer actions below the settings table.
         RenderMainMenuGraphs(ctx);
